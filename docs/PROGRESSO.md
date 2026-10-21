@@ -64,7 +64,7 @@ Versão simples e didática:
 1. **Instalar o `gcc` no Windows** (MSYS2 → MinGW-w64, colocar no PATH) e rodar
    `pio test -e native`. Esperado: `test_quadrature` 10/10 e `test_stepseq` 8/8.
 2. ~~Instalar o Git e versionar o projeto~~ ✔ feito em 21/10/2026 (repositório local, branch
-   `main`, ainda sem remoto no GitHub).
+   `main`, no GitHub em https://github.com/Gabalecrim/RoboCartesiano).
 3. **Pinos do encoder X divergentes**: a decisão registrada era GPIO **34/35**, mas
    `include/pins.h` está com **18/19**. Confirmar com o grupo qual vale.
 4. **Faltam pinos de saída** para 3 motores (12 fios) + garra com os encoders nos pinos
