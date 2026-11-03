@@ -35,6 +35,12 @@ int32_t stepper_position(const Stepper *m);
 void stepper_reset(Stepper *m, int32_t position);          // define a posição atual
 void stepper_release(Stepper *m);                          // desliga as bobinas
 
+// Diagnóstico de bancada: liga as bobinas pedidas direto nos pinos
+// (bit0 = IN1 ... bit3 = IN4), sem passar pela sequência e sem mudar
+// a posição. Serve para conferir a fiação, não para mover o motor.
+void stepper_test_coils(Stepper *m, uint8_t coils);
+uint8_t stepper_pin(const Stepper *m, uint8_t index);      // GPIO de IN1..IN4 (index 0..3)
+
 #ifdef __cplusplus
 }
 #endif

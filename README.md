@@ -100,8 +100,8 @@ pio test -e native
 
 | ULN2003 | ESP32 |
 |---|---|
-| `IN1` | GPIO 16 |
-| `IN2` | GPIO 17 |
+| `IN1` | GPIO 18 |
+| `IN2` | GPIO 19 |
 | `IN3` | GPIO 21 |
 | `IN4` | GPIO 22 |
 | `+` | 5 V de fonte externa (não usar o 3V3 do ESP32) |

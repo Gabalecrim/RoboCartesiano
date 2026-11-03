@@ -52,3 +52,11 @@ void stepper_reset(Stepper *m, int32_t position) {
 void stepper_release(Stepper *m) {
   writeCoils(m, 0);
 }
+
+void stepper_test_coils(Stepper *m, uint8_t coils) {
+  writeCoils(m, coils & 0xF);
+}
+
+uint8_t stepper_pin(const Stepper *m, uint8_t index) {
+  return m->pins[index & 0x3];
+}

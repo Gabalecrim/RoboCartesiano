@@ -81,7 +81,7 @@ Versão simples e didática:
 
 1. **Checkpoint 1 dos dois módulos** no PC (depende da pendência 1).
 2. **Checkpoint 2 do encoder** na placa: KY-040 no eixo X, uma volta = +80, ida e volta = 0.
-3. **Checkpoint 2 do motor** na placa: ULN2003 em GPIO 16/17/21/22, **5 V externo e GND comum**.
+3. **Checkpoint 2 do motor** na placa: ULN2003 em GPIO 18/19/21/22, **5 V externo e GND comum**.
    Comando `f` → motor 2048 e encoder ≈ +80; `b` → os dois voltam a ≈ 0.
    Se o encoder contar negativo, trocar IN1↔IN4 e IN2↔IN3 em `pins.h`.
 4. **Motor, Passo 3**: movimento sem bloquear (`loop()` continua rodando) e rampa de aceleração.
