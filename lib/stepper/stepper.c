@@ -25,19 +25,25 @@ void stepper_set_speed(Stepper *m, uint32_t steps_per_s) {
   m->interval_us = 1000000UL / steps_per_s;
 }
 
+void stepper_hold(Stepper *m) {
+  writeCoils(m, stepseq_coils(m->seq.phase));
+  delayMicroseconds(m->interval_us);
+}
+
+void stepper_step(Stepper *m, int8_t dir) {
+  if (dir == 0) return;
+  stepseq_step(&m->seq, dir > 0 ? 1 : -1);
+  writeCoils(m, stepseq_coils(m->seq.phase));
+  delayMicroseconds(m->interval_us);
+}
+
 void stepper_move(Stepper *m, int32_t steps) {
   int8_t dir = (steps > 0) ? 1 : -1;
   int32_t n = (steps > 0) ? steps : -steps;
 
   // Liga a fase atual antes de andar, para o rotor "encaixar" nela.
-  writeCoils(m, stepseq_coils(m->seq.phase));
-  delayMicroseconds(m->interval_us);
-
-  for (int32_t i = 0; i < n; i++) {
-    stepseq_step(&m->seq, dir);
-    writeCoils(m, stepseq_coils(m->seq.phase));
-    delayMicroseconds(m->interval_us);
-  }
+  stepper_hold(m);
+  for (int32_t i = 0; i < n; i++) stepper_step(m, dir);
 }
 
 int32_t stepper_position(const Stepper *m) {

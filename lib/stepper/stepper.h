@@ -35,6 +35,12 @@ int32_t stepper_position(const Stepper *m);
 void stepper_reset(Stepper *m, int32_t position);          // define a posição atual
 void stepper_release(Stepper *m);                          // desliga as bobinas
 
+// Passo a passo, para quem precisa conferir um sensor entre um passo e
+// outro (ex.: homing). Chame stepper_hold() uma vez antes do primeiro
+// passo: liga a fase atual para o rotor encaixar nela.
+void stepper_hold(Stepper *m);                             // liga a fase atual e espera
+void stepper_step(Stepper *m, int8_t dir);                 // um passo (+1/-1) e espera
+
 // Diagnóstico de bancada: liga as bobinas pedidas direto nos pinos
 // (bit0 = IN1 ... bit3 = IN4), sem passar pela sequência e sem mudar
 // a posição. Serve para conferir a fiação, não para mover o motor.
