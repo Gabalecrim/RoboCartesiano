@@ -54,6 +54,15 @@
 extern "C" {
 #endif
 
+// Medição do custo da amostragem (diagnóstico de desempenho).
+typedef struct EncoderStats {
+  uint32_t amostras;          // amostras desde o último encoder_stats_reset
+  uint64_t soma_us;           // tempo total gasto dentro da amostragem
+  uint32_t max_us;            // amostra mais demorada
+  uint32_t max_intervalo_us;  // maior espaço entre duas amostras (ideal: o período)
+  int8_t core;                // núcleo em que a amostragem roda (0 ou 1)
+} EncoderStats;
+
 // Os campos são internos: use só as funções encoder_*.
 typedef struct Encoder {
   uint8_t pinA;
@@ -62,6 +71,8 @@ typedef struct Encoder {
   Debounce debB;
   Quadrature q;
   esp_timer_handle_t timer;
+  EncoderStats stats;
+  int64_t ultima_amostra_us;  // para medir o intervalo entre amostras
   // Trava para a amostragem e o loop não mexerem nos dados ao mesmo tempo
   portMUX_TYPE mux;
 } Encoder;
@@ -74,6 +85,13 @@ void encoder_begin(Encoder *enc, uint8_t pinA, uint8_t pinB, bool pullup);
 int32_t encoder_count(Encoder *enc);              // posição atual, em contagens (x4)
 uint32_t encoder_errors(Encoder *enc);            // transições inválidas desde o início
 void encoder_reset(Encoder *enc, int32_t value);  // define a posição atual (homing)
+
+// Diagnóstico de desempenho. Parado, o encoder NÃO conta: o que girar
+// nesse tempo se perde (use encoder_reset depois).
+void encoder_stop(Encoder *enc);
+void encoder_start(Encoder *enc);
+void encoder_stats(Encoder *enc, EncoderStats *out);
+void encoder_stats_reset(Encoder *enc);
 
 #ifdef __cplusplus
 }
