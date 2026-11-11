@@ -13,7 +13,8 @@ lib/quadrature/           lógica pura do encoder (sem hardware, testável no PC
 lib/debounce/             filtro de repique (FSM), lógica pura, testável no PC
 lib/encoder/              encoder no ESP32 (amostragem por timer + debounce)
 lib/stepseq/              lógica pura do motor de passo (fases + contagem)
-lib/stepper/              motor no ESP32 (ULN2003)
+lib/rampa/                rampa de aceleração (perfil trapezoidal, inteiros), lógica pura
+lib/stepper/              motor no ESP32 (ULN2003), sem bloqueio, por interrupção
 lib/homing/               FSM do homing, lógica pura
 lib/calib/                estatística e calibração de distância, lógica pura
 lib/eixo/                 eixo no ESP32: motor + encoder + fim de curso
@@ -23,6 +24,7 @@ test/test_debounce/       testes do debounce e da cadeia debounce + quadratura
 test/test_stepseq/        testes automáticos da lógica do motor
 test/test_homing/         testes do homing (eixo simulado) e da estatística
 test/test_calib/          testes da calibração de distância (passos/mm)
+test/test_rampa/          testes da rampa de aceleração
 docs/PROGRESSO.md         onde paramos, decisões e próximos passos
 ```
 
@@ -117,7 +119,7 @@ Três instâncias de `Encoder`, uma por eixo, imprimindo `X Y Z`.
 
 ```
 lib/stepseq/              lógica pura: fases das bobinas e contagem de passos
-lib/stepper/              motor no ESP32 (4 pinos do ULN2003, movimento bloqueante)
+lib/stepper/              motor no ESP32 (4 pinos do ULN2003, sem bloqueio, com rampa)
 test/test_stepseq/        testes automáticos da lógica do motor
 ```
 
@@ -150,7 +152,66 @@ pio test -e native
 - `b` volta e os dois voltam para ≈ **0**;
 - se o encoder contar negativo com `f`, troquem IN1↔IN4 e IN2↔IN3 em `pins.h`.
 
-### Passo 3 (depois): movimento sem bloquear e rampa de aceleração
+### Passo 3: rampa de aceleração e movimento sem bloqueio
+
+```
+lib/rampa/                perfil trapezoidal em inteiros (lógica pura, testável no PC)
+lib/stepper/              interrupção de timer que gera os passos de até 3 motores
+test/test_rampa/          testes da rampa (tempo, simetria, triângulo, parar)
+```
+
+**Rampa.** O motor parte em `v0`, acelera `a` passos/s² até `vmax` e freia a tempo de chegar em `v0` no último passo. Movimento curto vira triângulo (não chega em `vmax`).
+
+```
+ vmax |     ________
+      |    /        \
+ v0   |___/          \___
+      +--------------------> passos
+```
+
+**Sem bloqueio.** Uma interrupção de timer a **20 kHz** (`STEPPER_TICK_HZ`), no núcleo 1, chama a rampa de cada motor a cada tique e escreve as 4 bobinas de uma vez no registrador do GPIO. O `loop()` só manda comandos:
+
+| Função | Faz |
+|---|---|
+| `stepper_start(&m, passos, soltar)` | começa a andar e **volta na hora** |
+| `stepper_start_to(&m, alvo, soltar)` | idem, para uma posição absoluta |
+| `stepper_busy(&m)` | ainda andando? |
+| `stepper_stop(&m)` / `stepper_abort(&m)` | freia pela rampa / para já |
+| `stepper_move(&m, passos)` | atalho bloqueante (start + espera) |
+| `stepper_sensor_arm(...)` | a interrupção para o motor quando um pino fica no estado pedido e guarda a posição (usado no homing) |
+
+Por que **inteiros** na rampa: no ESP32 a interrupção não pode usar ponto flutuante. A velocidade fica em Q32 "passos por tique": a cada tique `acc += v`; quando `acc` estoura, é um passo. A frenagem começa quando `faltam · 2 · dv <= v² − v0²` (sem divisão).
+
+Comandos da bancada:
+
+| Comando | Faz |
+|---|---|
+| `f`, `b3`, `x50` | andam sem bloquear; a serial avisa `-- parou --` no fim |
+| `q` | freia pela rampa |
+| `l` | para na hora e solta as bobinas |
+| `v800` | velocidade máxima (passos/s) |
+| `a1500` | aceleração (passos/s²); `a0` = sem rampa |
+| `n300` | velocidade de partida |
+| `v` | mostra o perfil (e quanto tempo/distância leva para acelerar) |
+
+Enquanto o motor anda, comandos que mexem nele (`f b h c d x t r 1-4 p o`) respondem `motor andando...`. `v`, `a`, `n`, `s`, `e`, `k`, `m` funcionam a qualquer momento.
+
+✅ **Checkpoint:**
+1. `f3` volta na hora; `v` durante o movimento responde; no fim aparece `-- parou --`.
+2. `f20` e `q` no meio: o motor freia suave e para.
+3. Subir `v` (800, 1000, 1200...) com `a1500` até perder passo; anotar o limite. Conferir com `x0`/`x50` e medida, ou com `d100`.
+4. `t2` com rampa: tempo real perto do ideal (o ideal agora vem da própria rampa).
+
+### Testes automáticos da rampa (`w` e `g`)
+
+Os dois medem o **erro de seguimento**: contagens lidas pelo encoder menos as esperadas pelos passos do motor (contagens/mm ÷ passos/mm). Motor que perde passo deixa o encoder para trás. Tolerância: 5 contagens + 2% do esperado. Precisam de homing (fazem se faltar). Os pontos ficam em `TESTE_A_MM` / `TESTE_B_MM` (10 e 40 mm): **dentro do curso real**.
+
+| Comando | Faz |
+|---|---|
+| `w` / `w1400` | vaivém 10 ↔ 40 mm subindo a vmax (500, 550 … 800, ou até o número); para na primeira que perder passo; homing no fim para conferir; mostra o limite e sugere 80% dele |
+| `g` / `g50` | grava 30 mm (ou o valor) a cada 10 ms e imprime CSV `t_ms;v_motor;v_encoder;motor_passos;encoder_cont;erro_cont` para plotar a curva |
+
+A aceleração e a partida são as atuais (`a`, `n`): para comparar acelerações, mude `a` e rode `w` de novo.
 
 ## Resolução (KY-040 no eixo de saída, fuso M8 passo 1,25 mm)
 
@@ -188,7 +249,8 @@ A polaridade é o 5º argumento de `eixo_begin()` no `main.cpp`: `false` = ativa
 | Estado | Faz | Sai quando |
 |---|---|---|
 | busca rápida | anda em `f` a 500 passos/s | a chave aciona |
-| recuo | anda em `b` | a chave solta + ¼ de volta |
+| recuo | anda em `b` | a chave solta |
+| recuo extra | anda em `b` | ¼ de volta |
 | busca lenta | anda em `f` a 150 passos/s | a chave aciona → **origem = 0** |
 
 O lado da chave é um parâmetro: `homingX.sentido = +1` (lado `f`) em `configurarHoming()`, no `main.cpp`. Com a chave do lado `b`, use `-1`; homing e calibração invertem juntos.
@@ -290,3 +352,27 @@ Depois do homing, a linha de estado mostra a posição em mm pelo motor e pelo e
 2. `x50` e medir a partir da chave: ~50 mm. `x0` volta à chave.
 3. Repetir `d100`: o erro deve cair para perto de 0%.
 4. Reset (botão EN): o boot mostra a calibração salva.
+
+## Diagnóstico: medição de velocidade (`t`)
+
+Responde se a amostragem do encoder atrasa o motor. `t` (1 volta) ou `t2` (2 voltas), na velocidade atual (`v`):
+
+1. N voltas em `f` com o encoder **ligado**, cronometradas com `micros()`;
+2. N voltas em `b` com o timer do encoder **parado**;
+3. compara os dois tempos com o ideal ((passos + 1) × intervalo) e mostra o custo da amostragem.
+
+```
+encoder LIGADO      3.415 s  (ideal 3.415 s)  ->   599.8 passos/s   +0.03%
+encoder PARADO      3.415 s  (ideal 3.415 s)  ->   599.8 passos/s   +0.02%
+diferenca ligado - parado: +40 us (+0.001%)
+amostragem: nucleo 0, 6830 amostras (2000/s, ideal 2000/s)
+            duracao media 1.10 us, maxima 4 us; maior intervalo 560 us (ideal 500)
+            ocupa 0.220% do nucleo 0 ...
+```
+(números ilustrativos)
+
+- **diferença ligado − parado** perto de 0: o encoder não atrapalha o motor.
+- **% em relação ao ideal**: o atraso do próprio laço do motor (escrita das bobinas, espera ocupada).
+- **núcleo**: a amostragem deve rodar no núcleo 0 e o motor no 1.
+- **maior intervalo**: muito acima de 500 µs = amostras atrasadas (risco de perder contagem em velocidade alta).
+- Na volta com o encoder parado ele não conta; no fim a contagem é realinhada pela posição do motor.

@@ -11,7 +11,7 @@ Registro de onde paramos, para o grupo retomar. Atualizar a cada sessão.
 | Módulo | Lógica (PC) | Na placa | Situação |
 |---|---|---|---|
 | 1. Encoder | quadratura 10/10, debounce 15/15 | debounce **não testado na placa** (antes: perdia ~12%) | Checkpoint 2 do Passo 3 |
-| 2. Motor de passo | 8/8 | gira; solta as bobinas ao parar | ok na bancada |
+| 2. Motor de passo | 8/8, rampa 14/14 | rampa + sem bloqueio **não testados na placa** | checkpoint do Passo 3 do Módulo 2 |
 | 3. Homing + auto calibração | homing 17/17 | **não testado** (falta instalar a chave no GPIO 36) | instalar a chave e fazer o checkpoint do Módulo 3 |
 | 4. Calibração de distância | calib 10/10 | **não testado** | `d100` + `m<medida>` na placa |
 
@@ -99,6 +99,25 @@ Versão simples e didática:
 - `k`/`k0` mostra/volta ao nominal; `x50` vai para 50 mm (precisa de homing).
 - Conta em `calib_distancia()` (lib/calib, testada no PC). Recusa medida > 10% do pedido.
 - `CURSO_X_MM = 200` é provisório: ajustar ao curso real.
+
+### Motor: rampa e movimento sem bloqueio
+- `lib/rampa`: perfil trapezoidal em inteiros (Q32 passos/tique), sem `float` (roda na
+  interrupção). Testado no PC: passos exatos, tempo do trapézio, triângulo, simetria, parar.
+- `lib/stepper`: interrupção de timer a 20 kHz (núcleo 1) gera os passos de até 3 motores;
+  bobinas escritas direto no registrador do GPIO; parada por sensor com debounce na
+  interrupção (2 ms) e posição guardada no ponto em que disparou.
+- `lib/homing` agora planeja por **trechos** (até acionar / até soltar / recuo extra),
+  executados pelo motor sem bloqueio; `eixo.c` vigia encoder (travou) e cancelamento.
+- Bancada: `f`/`b`/`x` não bloqueiam; `q` freia; `v`/`a`/`n` ajustam a rampa
+  (padrão: partida 300, máxima 520 passos/s, aceleração 1500 passos/s²).
+- Varredura `w` na bancada: 650 passos/s ok, 700 perde passo, com aceleração de 1000,
+  1500 ou 2500: o limite é o torque do 28BYJ-48 a 5 V, não a rampa. Trabalho: 520.
+- Funções da interrupção conferidas em `.iram0.text` no binário.
+- Ainda bloqueiam (esperam terminar, mas com o motor na interrupção): `h`, `c`, `d`, `t`.
+
+### Diagnóstico
+- `t`/`t2`: cronometra N voltas com o encoder ligado e parado e mostra o custo da
+  amostragem (núcleo, duração, maior intervalo). Para confirmar se o encoder atrasa o motor.
 
 ---
 
