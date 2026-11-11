@@ -19,8 +19,8 @@
 constexpr uint8_t ENC_X_A = 34;
 constexpr uint8_t ENC_X_B = 35;
 
-constexpr uint8_t ENC_Y_A = 32;
-constexpr uint8_t ENC_Y_B = 33;
+constexpr uint8_t ENC_Y_A = 33;
+constexpr uint8_t ENC_Y_B = 36;
 constexpr uint8_t ENC_Z_A = 25;
 constexpr uint8_t ENC_Z_B = 26;
 
@@ -32,6 +32,15 @@ constexpr uint8_t MOT_X_IN3 = 21;
 constexpr uint8_t MOT_X_IN4 = 22;
 // TODO: Y e Z. Atenção: com os encoders Y/Z nos pinos atuais, sobram
 // poucas saídas livres para 8 bobinas + garra (rever na etapa 3 eixos).
+
+// ---------- Fim de curso (homing) ----------
+// Chave NA no fim do curso do lado 'f' (lado em homingX.sentido, main.cpp). GPIO 36 é só entrada (não gasta
+// saída) e NÃO tem pull-down interno:
+//   GND --[10 kΩ]--+-- GPIO 36
+//                  +-- chave NA -- 3V3        (acionada = HIGH)
+// A errata do 36/39 (pulsos falsos com Wi-Fi/ADC) atrapalha interrupção;
+// aqui o pino é lido por amostragem com debounce, que rejeita esses pulsos.
+constexpr uint8_t HOME_X = 32;
 
 // ---------- Garra (solenoide) ----------
 // TODO: definir na etapa da garra
