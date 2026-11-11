@@ -1,97 +1,106 @@
 #include "homing.h"
 
-// Muda de estado e zera o que é contado por estado.
-static void entrar(Homing *h, HomingState s, int32_t enc) {
+static void parado(HomingTrecho *t) {
+  t->dir = 0;
+  t->passos_max = 0;
+  t->usa_sensor = false;
+  t->parar_com = false;
+  t->lento = false;
+}
+
+// Entra num estado e preenche o trecho correspondente.
+static void entrar(Homing *h, HomingState s, HomingTrecho *t) {
   h->state = s;
-  h->passos = 0;
-  h->apos_soltar = -1;
-  h->enc_ref = enc;
-  h->sem_mudar = 0;
-}
-
-static int8_t falhar(Homing *h, HomingError e) {
-  h->state = HOM_ERRO;
-  h->error = e;
-  return 0;
-}
-
-// Vigia de travamento: true se o encoder ficou parado tempo demais.
-// Chamada uma vez por passo dado (antes de decidir o próximo).
-static bool travou(Homing *h, int32_t enc) {
-  if (h->cfg.janela_trava <= 0) return false;
-  if (enc != h->enc_ref) {
-    h->enc_ref = enc;
-    h->sem_mudar = 0;
-    return false;
+  parado(t);
+  switch (s) {
+    case HOM_BUSCA_RAPIDA:
+      t->dir = +1;
+      t->passos_max = h->cfg.curso_max;
+      t->usa_sensor = true;
+      t->parar_com = true;  // até ACIONAR
+      break;
+    case HOM_RECUO:
+      t->dir = -1;
+      t->passos_max = h->cfg.recuo_max;
+      t->usa_sensor = true;
+      t->parar_com = false;  // até SOLTAR
+      break;
+    case HOM_RECUO_EXTRA:
+      t->dir = -1;
+      t->passos_max = h->cfg.recuo;
+      break;
+    case HOM_BUSCA_LENTA:
+      t->dir = +1;
+      t->passos_max = h->cfg.recuo_max + h->cfg.recuo;
+      t->usa_sensor = true;
+      t->parar_com = true;
+      t->lento = true;
+      break;
+    default:
+      break;  // PARADO, OK, ERRO: não anda
   }
-  return ++h->sem_mudar >= h->cfg.janela_trava;
 }
 
-void homing_start(Homing *h, const HomingConfig *cfg, bool chave, int32_t enc) {
+static void falhar(Homing *h, HomingError e, HomingTrecho *t) {
+  h->error = e;
+  entrar(h, HOM_ERRO, t);
+}
+
+void homing_start(Homing *h, const HomingConfig *cfg, bool chave, HomingTrecho *t) {
   h->cfg = *cfg;
   h->error = HOM_ERRO_NENHUM;
-  entrar(h, chave ? HOM_RECUO : HOM_BUSCA_RAPIDA, enc);
+  entrar(h, chave ? HOM_RECUO : HOM_BUSCA_RAPIDA, t);
 }
 
-int8_t homing_update(Homing *h, bool chave, int32_t enc) {
+void homing_fim_trecho(Homing *h, HomingFim fim, HomingTrecho *t) {
+  bool andando = h->state == HOM_BUSCA_RAPIDA || h->state == HOM_RECUO ||
+                 h->state == HOM_RECUO_EXTRA || h->state == HOM_BUSCA_LENTA;
+  if (!andando) {
+    entrar(h, h->state, t);  // OK, ERRO ou PARADO: continua parado
+    return;
+  }
+  if (fim == HOM_FIM_TRAVOU) {
+    falhar(h, HOM_ERRO_TRAVOU, t);
+    return;
+  }
+
   switch (h->state) {
     case HOM_BUSCA_RAPIDA:
-      if (chave) {
-        entrar(h, HOM_RECUO, enc);
-        break;  // o RECUO decide o passo abaixo
-      }
-      if (h->passos > 0 && travou(h, enc)) return falhar(h, HOM_ERRO_TRAVOU);
-      if (h->passos >= h->cfg.curso_max) return falhar(h, HOM_ERRO_CURSO);
-      h->passos++;
-      return +1;
-
-    case HOM_BUSCA_LENTA:
-      if (chave) {
-        h->state = HOM_OK;  // origem: o ponto exato em que acionou
-        return 0;
-      }
-      if (h->passos > 0 && travou(h, enc)) return falhar(h, HOM_ERRO_TRAVOU);
-      if (h->passos >= h->cfg.recuo_max + h->cfg.recuo) return falhar(h, HOM_ERRO_NAO_ACHOU);
-      h->passos++;
-      return +1;
-
-    case HOM_PARADO:
-    case HOM_OK:
-    case HOM_ERRO:
-    default:
-      return 0;
-
+      if (fim == HOM_FIM_SENSOR) entrar(h, HOM_RECUO, t);
+      else falhar(h, HOM_ERRO_CURSO, t);
+      break;
     case HOM_RECUO:
+      if (fim != HOM_FIM_SENSOR) falhar(h, HOM_ERRO_CHAVE_PRESA, t);
+      else if (h->cfg.recuo > 0) entrar(h, HOM_RECUO_EXTRA, t);
+      else entrar(h, HOM_BUSCA_LENTA, t);
+      break;
+    case HOM_RECUO_EXTRA:
+      entrar(h, HOM_BUSCA_LENTA, t);  // trecho sem sensor: terminou = andou tudo
+      break;
+    case HOM_BUSCA_LENTA:
+      if (fim == HOM_FIM_SENSOR) entrar(h, HOM_OK, t);
+      else falhar(h, HOM_ERRO_NAO_ACHOU, t);
+      break;
+    default:
       break;
   }
+}
 
-  // ---- RECUO (também chega aqui logo depois da busca rápida) ----
-  if (h->passos > 0 && travou(h, enc)) return falhar(h, HOM_ERRO_TRAVOU);
-  if (h->apos_soltar < 0) {
-    if (!chave) {
-      h->apos_soltar = 0;  // soltou: agora conta o recuo extra
-    } else if (h->passos >= h->cfg.recuo_max) {
-      return falhar(h, HOM_ERRO_CHAVE_PRESA);
-    }
-  }
-  if (h->apos_soltar >= h->cfg.recuo) {
-    entrar(h, HOM_BUSCA_LENTA, enc);
-    return homing_update(h, chave, enc);  // primeiro passo da busca lenta
-  }
-  if (h->apos_soltar >= 0) h->apos_soltar++;
-  h->passos++;
-  return -1;
+void homing_cancelar(Homing *h) {
+  if (h->state == HOM_OK || h->state == HOM_ERRO) return;
+  h->state = HOM_ERRO;
+  h->error = HOM_ERRO_CANCELADO;
 }
 
 HomingState homing_state(const Homing *h) { return h->state; }
 HomingError homing_error(const Homing *h) { return h->error; }
-bool homing_lento(const Homing *h) { return h->state == HOM_BUSCA_LENTA; }
 
 const char *homing_state_nome(HomingState s) {
   switch (s) {
     case HOM_PARADO: return "parado";
     case HOM_BUSCA_RAPIDA: return "busca rapida";
     case HOM_RECUO: return "recuo";
+    case HOM_RECUO_EXTRA: return "recuo extra";
     case HOM_BUSCA_LENTA: return "busca lenta";
     case HOM_OK: return "ok";
     case HOM_ERRO: return "erro";

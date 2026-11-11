@@ -1,11 +1,14 @@
 #pragma once
 // =============================================================
-//  Homing de um eixo - lógica PURA (máquina de estados)
+//  Homing de um eixo - lógica PURA (máquina de estados por TRECHOS)
 // =============================================================
 //
-// Este módulo não sabe nada de ESP32, pinos ou tempo. A cada passo
-// a camada de hardware (eixo.c) informa a chave de fim de curso e a
-// contagem do encoder, e a FSM responde para onde dar o próximo passo.
+// Este módulo não sabe nada de ESP32, pinos ou tempo. Ele planeja o
+// homing em TRECHOS ("ande até a chave acionar, no máximo N passos");
+// quem executa é a camada de hardware (eixo.c), com o motor sem
+// bloqueio: a interrupção do motor lê a chave e para no ponto exato.
+// No fim de cada trecho, eixo.c conta como terminou e a FSM devolve
+// o próximo trecho.
 //
 // Por ser puro, roda nos testes do PC:  pio test -e native
 //
@@ -14,22 +17,19 @@
 //
 // Sequência (duas aproximações, para a origem repetir sempre igual):
 //
-//   BUSCA_RAPIDA  -- chave acionou -->  RECUO
-//     anda +1 rápido até a chave acionar
-//   RECUO         -- chave soltou + 'recuo' passos -->  BUSCA_LENTA
-//     anda -1 até a chave soltar e mais 'recuo' passos
-//   BUSCA_LENTA   -- chave acionou -->  OK  (este ponto é a origem)
-//     anda +1 devagar até a chave acionar de novo
+//   BUSCA_RAPIDA  +1 rápido até a chave ACIONAR          -> RECUO
+//   RECUO         -1 até a chave SOLTAR                  -> RECUO_EXTRA
+//   RECUO_EXTRA   -1 mais 'recuo' passos                 -> BUSCA_LENTA
+//   BUSCA_LENTA   +1 devagar até a chave ACIONAR         -> OK (origem)
 //
 // Se a chave já estiver acionada na partida, começa direto no RECUO.
 //
-// Erros (estado ERRO, para de andar):
-//   CURSO        andou 'curso_max' passos na busca rápida sem achar a chave
-//   CHAVE_PRESA  recuou 'recuo_max' passos e a chave não soltou
-//   NAO_ACHOU    a busca lenta passou de 'recuo_max + recuo' sem achar a chave
-//   TRAVOU       o encoder ficou parado por 'janela_trava' passos seguidos:
-//                o motor está mandando passos e o eixo não gira (batente,
-//                eixo preso, motor sem força ou encoder desligado)
+// Erros (estado ERRO):
+//   CURSO        a busca rápida andou 'curso_max' sem achar a chave
+//   CHAVE_PRESA  recuou 'recuo_max' e a chave não soltou
+//   NAO_ACHOU    a busca lenta andou 'recuo_max + recuo' sem achar a chave
+//   TRAVOU       eixo.c viu o encoder parado por 'janela_trava' passos
+//   CANCELADO    pedido de parada (camada de hardware)
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -42,6 +42,7 @@ typedef enum HomingState {
   HOM_PARADO = 0,  // antes do homing_start
   HOM_BUSCA_RAPIDA,
   HOM_RECUO,
+  HOM_RECUO_EXTRA,
   HOM_BUSCA_LENTA,
   HOM_OK,
   HOM_ERRO,
@@ -60,32 +61,44 @@ typedef struct HomingConfig {
   int32_t curso_max;     // passos máximos na busca rápida (> curso do eixo)
   int32_t recuo;         // passos a mais depois que a chave solta
   int32_t recuo_max;     // passos máximos de recuo esperando a chave soltar
-  int32_t janela_trava;  // passos seguidos sem o encoder mudar = travou (0 = não vigia)
+  int32_t janela_trava;  // passos sem o encoder mudar = travou (0 = não vigia; usado por eixo.c)
 } HomingConfig;
+
+// Como um trecho terminou.
+typedef enum HomingFim {
+  HOM_FIM_SENSOR = 0,  // a chave chegou no estado pedido (o motor parou ali)
+  HOM_FIM_LIMITE,      // andou todos os passos do trecho
+  HOM_FIM_TRAVOU,      // o encoder parou de mudar
+} HomingFim;
+
+// O que a camada de hardware deve fazer agora.
+typedef struct HomingTrecho {
+  int8_t dir;          // +1 para a chave, -1 afastando; 0 = acabou (veja o estado)
+  int32_t passos_max;  // limite de passos do trecho
+  bool usa_sensor;     // parar quando a chave ficar == parar_com
+  bool parar_com;      // true = parar quando ACIONAR, false = quando SOLTAR
+  bool lento;          // true: velocidade lenta (busca lenta)
+} HomingTrecho;
 
 typedef struct Homing {
   HomingConfig cfg;
   HomingState state;
   HomingError error;
-  int32_t passos;      // passos dados no estado atual
-  int32_t apos_soltar; // passos de recuo depois que a chave soltou (-1 = ainda presa)
-  int32_t enc_ref;     // última contagem do encoder vista mudando
-  int32_t sem_mudar;   // passos seguidos sem o encoder mudar
 } Homing;
 
 // Em C não há valor padrão nos campos: declare com  Homing h = {0};
 
-// Começa o homing. 'chave' e 'enc' são as leituras atuais.
-void homing_start(Homing *h, const HomingConfig *cfg, bool chave, int32_t enc);
+// Começa o homing com a leitura atual da chave e devolve o 1º trecho.
+void homing_start(Homing *h, const HomingConfig *cfg, bool chave, HomingTrecho *t);
 
-// Chamada antes de cada passo, com as leituras atuais.
-// Devolve o próximo passo: +1 (para a chave), -1 (afastando) ou 0 (parar).
-// Devolve 0 quando terminou: confira homing_state() (OK ou ERRO).
-int8_t homing_update(Homing *h, bool chave, int32_t enc);
+// O trecho atual terminou por 'fim'. Devolve o próximo (dir = 0: acabou).
+void homing_fim_trecho(Homing *h, HomingFim fim, HomingTrecho *t);
+
+// Marca o homing como cancelado (dir = 0 daqui em diante).
+void homing_cancelar(Homing *h);
 
 HomingState homing_state(const Homing *h);
 HomingError homing_error(const Homing *h);
-bool homing_lento(const Homing *h);  // true na BUSCA_LENTA: usar a velocidade baixa
 
 // Textos para o Monitor Serial.
 const char *homing_state_nome(HomingState s);

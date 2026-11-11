@@ -4,8 +4,10 @@
 // =============================================================
 //
 // Junta as peças de um eixo e roda o homing (FSM em lib/homing) e a
-// auto calibração. Tudo aqui é BLOQUEANTE, como o stepper_move():
-// a função só volta quando termina, dá erro ou é cancelada.
+// auto calibração. O motor anda SEM bloquear (interrupção, lib/stepper),
+// mas estas funções esperam o procedimento terminar, conferindo o
+// cancelamento e o encoder enquanto o motor anda. O homing é feito em
+// trechos (lib/homing): a interrupção do motor para na chave, no ponto exato.
 //
 // Auto calibração (eixo_calibrar):
 //   1. homing                      -> define a origem (0) na chave
@@ -33,8 +35,13 @@
 extern "C" {
 #endif
 
-// Amostras seguidas (uma por passo) para a chave valer.
-// A 150 passos/s, 3 amostras ~ 20 ms: cobre o repique de microchaves.
+// Debounce da chave DURANTE o homing: a interrupção do motor lê a chave
+// a cada tique e só aceita depois de EIXO_CHAVE_DEBOUNCE_US seguidos.
+#ifndef EIXO_CHAVE_DEBOUNCE_US
+#define EIXO_CHAVE_DEBOUNCE_US 10000u  // 2 ms não bastou: a chave repicou ao acionar
+#endif
+// Debounce da chave FORA do homing (eixo_chave(), chamada pelo loop):
+// amostras seguidas para valer.
 #define EIXO_CHAVE_DEBOUNCE 3
 
 // Avisos do homing, para a bancada imprimir o que está acontecendo.
@@ -107,9 +114,9 @@ bool eixo_chave(Eixo *e);             // passa uma amostra pelo debounce (aciona
 // quem chamou deve restaurar a sua depois.
 HomingError eixo_home(Eixo *e, const EixoHomingCfg *cfg, EixoHomeResult *out);
 
-// Anda 'passos' (sinal = giro: + f, - b) na velocidade rápida, conferindo
-// o cancelamento a cada passo. Termina com as bobinas LIGADAS (segura a
-// posição): quem chamou solta quando quiser. false = cancelado.
+// Anda 'passos' (sinal = giro: + f, - b) com o PERFIL ATUAL do motor
+// (rampa), esperando terminar e conferindo o cancelamento. Termina com
+// as bobinas LIGADAS (segura a posição). false = cancelado ou ocupado.
 bool eixo_andar(Eixo *e, const EixoHomingCfg *cfg, int32_t passos);
 
 // Auto calibração (ver topo). 'aviso' (pode ser NULL) é chamada ao fim

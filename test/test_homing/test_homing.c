@@ -5,6 +5,8 @@
 // Um eixo simulado substitui o hardware: posição em passos, chave de
 // fim de curso com histerese, encoder de 80 contagens por 2048 passos
 // e, se quiser, um batente que impede o eixo de andar.
+// executar() faz o papel do motor + eixo.c: anda um trecho, confere a
+// chave antes de cada passo e vigia o encoder em janelas.
 
 #include <limits.h>
 #include <stdbool.h>
@@ -73,18 +75,35 @@ static const HomingConfig CFG = {
     .janela_trava = 256,
 };
 
+// Executa um trecho como o motor faria. Devolve como terminou.
+static HomingFim executar(Sim *s, const HomingTrecho *t, int32_t janela, long *passos) {
+  int32_t enc_ck = sim_enc(s);
+  int32_t desde_ck = 0;
+  for (int32_t n = 0; n < t->passos_max; n++) {
+    if (t->usa_sensor && s->chave == t->parar_com) return HOM_FIM_SENSOR;
+    sim_passo(s, t->dir);
+    (*passos)++;
+    if (janela > 0 && ++desde_ck >= janela) {
+      int32_t e = sim_enc(s);
+      if (e == enc_ck) return HOM_FIM_TRAVOU;
+      enc_ck = e;
+      desde_ck = 0;
+    }
+  }
+  return HOM_FIM_LIMITE;
+}
+
 // Roda o homing até parar; devolve o estado final.
 static HomingState rodar(Homing *h, Sim *s, const HomingConfig *cfg, long *passos) {
-  sim_atualiza_chave(s);
-  homing_start(h, cfg, s->chave, sim_enc(s));
   long n = 0;
-  for (; n < 2000000; n++) {
-    int8_t d = homing_update(h, s->chave, sim_enc(s));
-    if (d == 0) break;
-    bool lento = homing_lento(h);
-    s->usou_lento |= lento;
-    if (lento && homing_state(h) != HOM_BUSCA_LENTA) s->lento_fora_da_busca_lenta = true;
-    sim_passo(s, d);
+  sim_atualiza_chave(s);
+  HomingTrecho t;
+  homing_start(h, cfg, s->chave, &t);
+  for (int i = 0; i < 100 && t.dir != 0; i++) {
+    s->usou_lento |= t.lento;
+    if (t.lento && homing_state(h) != HOM_BUSCA_LENTA) s->lento_fora_da_busca_lenta = true;
+    HomingFim fim = executar(s, &t, cfg->janela_trava, &n);
+    homing_fim_trecho(h, fim, &t);
   }
   if (passos) *passos = n;
   return homing_state(h);
@@ -120,8 +139,12 @@ void test_comeca_com_a_chave_acionada(void) {
   Sim s;
   sim_init(&s, 10);  // já em cima da chave
   sim_atualiza_chave(&s);
-  homing_start(&h, &CFG, s.chave, sim_enc(&s));
+  HomingTrecho t;
+  homing_start(&h, &CFG, s.chave, &t);
   TEST_ASSERT_EQUAL_INT(HOM_RECUO, homing_state(&h));
+  TEST_ASSERT_EQUAL_INT8(-1, t.dir);
+  TEST_ASSERT_TRUE(t.usa_sensor);
+  TEST_ASSERT_FALSE(t.parar_com);  // recua até SOLTAR
   TEST_ASSERT_EQUAL_INT(HOM_OK, rodar(&h, &s, &CFG, NULL));
   TEST_ASSERT_EQUAL_INT32(0, s.pos);
 }
@@ -170,7 +193,7 @@ void test_erro_travou_no_batente_antes_da_chave(void) {
 }
 
 void test_travou_para_logo_depois_da_janela(void) {
-  // Do batente até o erro: no máximo a janela + os passos de 1 contagem.
+  // A vigia é por janelas: do batente até o erro, no máximo 2 janelas.
   Homing h = {0};
   Sim s;
   sim_init(&s, -2048);
@@ -178,7 +201,7 @@ void test_travou_para_logo_depois_da_janela(void) {
   long passos;
   rodar(&h, &s, &CFG, &passos);
   long ate_batente = -1000 - (-2048);
-  TEST_ASSERT_LESS_OR_EQUAL(ate_batente + CFG.janela_trava + 26, passos);
+  TEST_ASSERT_LESS_OR_EQUAL(ate_batente + 2 * CFG.janela_trava, passos);
 }
 
 void test_erro_encoder_parado(void) {
@@ -224,8 +247,63 @@ void test_erro_nao_achou_na_busca_lenta(void) {
 
 void test_sem_start_nao_anda(void) {
   Homing h = {0};
-  TEST_ASSERT_EQUAL_INT8(0, homing_update(&h, false, 0));
+  HomingTrecho t;
+  homing_fim_trecho(&h, HOM_FIM_SENSOR, &t);
+  TEST_ASSERT_EQUAL_INT8(0, t.dir);
   TEST_ASSERT_EQUAL_INT(HOM_PARADO, homing_state(&h));
+}
+
+void test_primeiro_trecho_busca_rapida_ate_acionar(void) {
+  Homing h = {0};
+  HomingTrecho t;
+  homing_start(&h, &CFG, false, &t);
+  TEST_ASSERT_EQUAL_INT(HOM_BUSCA_RAPIDA, homing_state(&h));
+  TEST_ASSERT_EQUAL_INT8(+1, t.dir);
+  TEST_ASSERT_EQUAL_INT32(CFG.curso_max, t.passos_max);
+  TEST_ASSERT_TRUE(t.usa_sensor);
+  TEST_ASSERT_TRUE(t.parar_com);
+  TEST_ASSERT_FALSE(t.lento);
+}
+
+void test_sequencia_dos_trechos(void) {
+  Homing h = {0};
+  HomingTrecho t;
+  homing_start(&h, &CFG, false, &t);
+  homing_fim_trecho(&h, HOM_FIM_SENSOR, &t);
+  TEST_ASSERT_EQUAL_INT(HOM_RECUO, homing_state(&h));
+  homing_fim_trecho(&h, HOM_FIM_SENSOR, &t);
+  TEST_ASSERT_EQUAL_INT(HOM_RECUO_EXTRA, homing_state(&h));
+  TEST_ASSERT_EQUAL_INT8(-1, t.dir);
+  TEST_ASSERT_EQUAL_INT32(CFG.recuo, t.passos_max);
+  TEST_ASSERT_FALSE(t.usa_sensor);
+  homing_fim_trecho(&h, HOM_FIM_LIMITE, &t);
+  TEST_ASSERT_EQUAL_INT(HOM_BUSCA_LENTA, homing_state(&h));
+  TEST_ASSERT_TRUE(t.lento);
+  TEST_ASSERT_EQUAL_INT32(CFG.recuo_max + CFG.recuo, t.passos_max);
+  homing_fim_trecho(&h, HOM_FIM_SENSOR, &t);
+  TEST_ASSERT_EQUAL_INT(HOM_OK, homing_state(&h));
+  TEST_ASSERT_EQUAL_INT8(0, t.dir);
+}
+
+void test_recuo_zero_pula_o_recuo_extra(void) {
+  HomingConfig cfg = CFG;
+  cfg.recuo = 0;
+  Homing h = {0};
+  HomingTrecho t;
+  homing_start(&h, &cfg, true, &t);
+  homing_fim_trecho(&h, HOM_FIM_SENSOR, &t);
+  TEST_ASSERT_EQUAL_INT(HOM_BUSCA_LENTA, homing_state(&h));
+}
+
+void test_cancelar_para_o_homing(void) {
+  Homing h = {0};
+  HomingTrecho t;
+  homing_start(&h, &CFG, false, &t);
+  homing_cancelar(&h);
+  TEST_ASSERT_EQUAL_INT(HOM_ERRO, homing_state(&h));
+  TEST_ASSERT_EQUAL_INT(HOM_ERRO_CANCELADO, homing_error(&h));
+  homing_fim_trecho(&h, HOM_FIM_SENSOR, &t);
+  TEST_ASSERT_EQUAL_INT8(0, t.dir);
 }
 
 void test_depois_de_ok_fica_parado(void) {
@@ -233,8 +311,11 @@ void test_depois_de_ok_fica_parado(void) {
   Sim s;
   sim_init(&s, -300);
   rodar(&h, &s, &CFG, NULL);
-  TEST_ASSERT_EQUAL_INT8(0, homing_update(&h, false, 123));
-  TEST_ASSERT_EQUAL_INT8(0, homing_update(&h, true, 456));
+  HomingTrecho t;
+  homing_fim_trecho(&h, HOM_FIM_SENSOR, &t);
+  TEST_ASSERT_EQUAL_INT8(0, t.dir);
+  homing_fim_trecho(&h, HOM_FIM_LIMITE, &t);
+  TEST_ASSERT_EQUAL_INT8(0, t.dir);
   TEST_ASSERT_EQUAL_INT(HOM_OK, homing_state(&h));
 }
 
@@ -286,6 +367,10 @@ int main(void) {
   RUN_TEST(test_erro_chave_presa);
   RUN_TEST(test_erro_nao_achou_na_busca_lenta);
   RUN_TEST(test_sem_start_nao_anda);
+  RUN_TEST(test_primeiro_trecho_busca_rapida_ate_acionar);
+  RUN_TEST(test_sequencia_dos_trechos);
+  RUN_TEST(test_recuo_zero_pula_o_recuo_extra);
+  RUN_TEST(test_cancelar_para_o_homing);
   RUN_TEST(test_depois_de_ok_fica_parado);
   RUN_TEST(test_estat_vazia);
   RUN_TEST(test_estat_min_max_media);

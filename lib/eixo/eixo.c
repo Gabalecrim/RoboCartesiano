@@ -1,5 +1,8 @@
 #include "eixo.h"
 
+// Tiques da interrupção dos motores para a chave valer (debounce).
+#define CHAVE_TIQUES ((uint16_t)((uint64_t)EIXO_CHAVE_DEBOUNCE_US * STEPPER_TICK_HZ / 1000000u))
+
 // Giro do motor que vai para a chave: +1 (f) ou -1 (b).
 static int8_t paraChave(const EixoHomingCfg *cfg) {
   return cfg->sentido < 0 ? -1 : 1;
@@ -10,13 +13,14 @@ static int8_t giroDoEstado(const EixoHomingCfg *cfg, HomingState s) {
   switch (s) {
     case HOM_BUSCA_RAPIDA:
     case HOM_BUSCA_LENTA: return paraChave(cfg);
-    case HOM_RECUO: return (int8_t)-paraChave(cfg);
+    case HOM_RECUO:
+    case HOM_RECUO_EXTRA: return (int8_t)-paraChave(cfg);
     default: return 0;
   }
 }
 
-static void avisar(Eixo *e, const EixoHomingCfg *cfg, EixoEventoTipo tipo,
-                   HomingState estado, bool chave, bool inicio) {
+static void avisar(Eixo *e, const EixoHomingCfg *cfg, EixoEventoTipo tipo, HomingState estado,
+                   bool chave, bool inicio, int32_t motor) {
   if (!cfg->evento) return;
   EixoEvento ev;
   ev.tipo = tipo;
@@ -24,7 +28,7 @@ static void avisar(Eixo *e, const EixoHomingCfg *cfg, EixoEventoTipo tipo,
   ev.chave = chave;
   ev.giro = giroDoEstado(cfg, estado);
   ev.inicio = inicio;
-  ev.motor = stepper_position(e->motor);
+  ev.motor = motor;
   ev.enc = encoder_count(e->enc);
   cfg->evento(&ev, cfg->ctx);
 }
@@ -52,58 +56,104 @@ bool eixo_chave(Eixo *e) {
   return debounce_update(&e->chave, eixo_chave_crua(e)) != 0;
 }
 
+// Espera o motor terminar o movimento já iniciado, vigiando o cancelamento
+// e (se janela > 0) o encoder: 'janela' passos sem ele mudar = travou.
+typedef enum { ESPERA_FIM, ESPERA_TRAVOU, ESPERA_CANCELADO } Espera;
+
+static Espera esperar(Eixo *e, const EixoHomingCfg *cfg, int32_t janela) {
+  int32_t pos_ck = stepper_position(e->motor);
+  int32_t enc_ck = encoder_count(e->enc);
+  while (stepper_busy(e->motor)) {
+    if (cancelado(cfg)) {
+      stepper_abort(e->motor);
+      return ESPERA_CANCELADO;
+    }
+    if (janela > 0) {
+      int32_t pos = stepper_position(e->motor);
+      int32_t andou = pos > pos_ck ? pos - pos_ck : pos_ck - pos;
+      if (andou >= janela) {
+        int32_t enc = encoder_count(e->enc);
+        if (enc == enc_ck) {
+          stepper_abort(e->motor);
+          return ESPERA_TRAVOU;
+        }
+        pos_ck = pos;
+        enc_ck = enc;
+      }
+    }
+    delay(1);
+  }
+  return ESPERA_FIM;
+}
+
 HomingError eixo_home(Eixo *e, const EixoHomingCfg *cfg, EixoHomeResult *out) {
   Homing h = {0};
+  HomingTrecho t;
   out->erro = HOM_ERRO_NENHUM;
   out->passos_dados = 0;
   out->passos_na_chave = 0;
   out->enc_na_chave = 0;
 
+  stepper_abort(e->motor);
+  StepperPerfil antes;
+  stepper_get_profile(e->motor, &antes);
+
   // Parte da leitura atual, já aceita (sem esperar o debounce).
   debounce_init(&e->chave, eixo_chave_crua(e), EIXO_CHAVE_DEBOUNCE);
   bool chave = debounce_level(&e->chave);
-  homing_start(&h, &cfg->fsm, chave, encoder_count(e->enc));
-  HomingState estado = homing_state(&h);
-  avisar(e, cfg, EIXO_EV_ESTADO, estado, chave, true);
+  homing_start(&h, &cfg->fsm, chave, &t);
+  avisar(e, cfg, EIXO_EV_ESTADO, homing_state(&h), chave, true, stepper_position(e->motor));
 
-  uint32_t vel_atual = 0;
-  stepper_set_speed(e->motor, cfg->vel_rapida);
-  stepper_hold(e->motor);
+  int32_t na_chave = 0;
+  while (t.dir != 0) {
+    // Homing sem rampa: velocidade constante, para a origem repetir.
+    uint32_t v = t.lento ? cfg->vel_lenta : cfg->vel_rapida;
+    StepperPerfil p = {v, v, 0};
+    stepper_set_profile(e->motor, &p);
+    if (t.usa_sensor) {
+      stepper_sensor_arm(e->motor, e->pino_chave, !e->ativa_em_baixo, t.parar_com, CHAVE_TIQUES);
+    } else {
+      stepper_sensor_disarm(e->motor);
+    }
 
-  for (;;) {
-    if (cancelado(cfg)) {
-      out->erro = HOM_ERRO_CANCELADO;
+    int32_t pos0 = stepper_position(e->motor);
+    stepper_start(e->motor, (int32_t)(t.dir * paraChave(cfg)) * t.passos_max, false);
+    Espera r = esperar(e, cfg, cfg->fsm.janela_trava);
+    int32_t pos1 = stepper_position(e->motor);
+    out->passos_dados += (uint32_t)(pos1 > pos0 ? pos1 - pos0 : pos0 - pos1);
+
+    if (r == ESPERA_CANCELADO) {
+      homing_cancelar(&h);
       break;
     }
-    bool agora = eixo_chave(e);
-    if (agora != chave) {
-      chave = agora;
-      avisar(e, cfg, EIXO_EV_CHAVE, homing_state(&h), chave, false);
+    HomingFim fim = HOM_FIM_LIMITE;
+    int32_t pos_sensor;
+    if (r == ESPERA_TRAVOU) {
+      fim = HOM_FIM_TRAVOU;
+    } else if (stepper_sensor_fired(e->motor, &pos_sensor)) {
+      fim = HOM_FIM_SENSOR;
+      chave = t.parar_com;
+      na_chave = pos_sensor;
+      avisar(e, cfg, EIXO_EV_CHAVE, homing_state(&h), chave, false, pos_sensor);
     }
-    int8_t dir = homing_update(&h, chave, encoder_count(e->enc));
-    if (homing_state(&h) != estado) {
-      estado = homing_state(&h);
-      avisar(e, cfg, EIXO_EV_ESTADO, estado, chave, false);
+
+    HomingState antes_estado = homing_state(&h);
+    homing_fim_trecho(&h, fim, &t);
+    if (homing_state(&h) != antes_estado) {
+      avisar(e, cfg, EIXO_EV_ESTADO, homing_state(&h), chave, false, stepper_position(e->motor));
     }
-    if (dir == 0) {
-      out->erro = homing_error(&h);
-      break;
-    }
-    uint32_t vel = homing_lento(&h) ? cfg->vel_lenta : cfg->vel_rapida;
-    if (vel != vel_atual) {
-      stepper_set_speed(e->motor, vel);
-      vel_atual = vel;
-    }
-    stepper_step(e->motor, (int8_t)(dir * paraChave(cfg)));  // FSM -> giro real
-    out->passos_dados++;
   }
 
+  stepper_sensor_disarm(e->motor);
+  stepper_set_profile(e->motor, &antes);
   out->parou_em = homing_state(&h);
+  out->erro = homing_error(&h);
   if (out->erro == HOM_ERRO_NENHUM) {
-    // Onde a chave acionou, medido na origem ANTERIOR. Depois zera.
-    out->passos_na_chave = stepper_position(e->motor);
+    // Onde a chave acionou, medido na origem ANTERIOR. A origem nova (0)
+    // é esse ponto; a interrupção parou o motor nele.
+    out->passos_na_chave = na_chave;
     out->enc_na_chave = encoder_count(e->enc);
-    stepper_reset(e->motor, 0);
+    stepper_reset(e->motor, stepper_position(e->motor) - na_chave);
     encoder_reset(e->enc, 0);
   }
   stepper_release(e->motor);  // parado não precisa de corrente
@@ -111,15 +161,9 @@ HomingError eixo_home(Eixo *e, const EixoHomingCfg *cfg, EixoHomeResult *out) {
 }
 
 bool eixo_andar(Eixo *e, const EixoHomingCfg *cfg, int32_t passos) {
-  int8_t dir = passos > 0 ? 1 : -1;
-  int32_t n = passos > 0 ? passos : -passos;
-  stepper_set_speed(e->motor, cfg->vel_rapida);
-  stepper_hold(e->motor);
-  for (int32_t i = 0; i < n; i++) {
-    if (cancelado(cfg)) return false;
-    stepper_step(e->motor, dir);
-  }
-  return true;
+  stepper_sensor_disarm(e->motor);
+  if (!stepper_start(e->motor, passos, false)) return false;
+  return esperar(e, cfg, 0) == ESPERA_FIM;
 }
 
 HomingError eixo_calibrar(Eixo *e, const EixoHomingCfg *cfg, int32_t passos_ida,
@@ -147,6 +191,7 @@ HomingError eixo_calibrar(Eixo *e, const EixoHomingCfg *cfg, int32_t passos_ida,
     int32_t enc0 = encoder_count(e->enc);
     bool ok = eixo_andar(e, cfg, ida);
     stepper_release(e->motor);
+    delay(5);  // última transição passa pelo debounce do encoder
     c.enc_ida = encoder_count(e->enc) - enc0;
     if (!ok) {
       out->erro = HOM_ERRO_CANCELADO;
