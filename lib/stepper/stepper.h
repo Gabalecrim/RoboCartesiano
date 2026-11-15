@@ -52,6 +52,7 @@ typedef struct Stepper {
 
   StepSeq seq;            // fase e posição (atualizadas pela interrupção)
   StepperPerfil perfil;
+  uint32_t vlim;          // limite de velocidade por cima do perfil (0 = sem)
   Rampa rampa;            // usada pela interrupção
   volatile bool ativo;
   volatile uint32_t movimentos;  // conta os stepper_start que andaram (1 por movimento)
@@ -79,6 +80,11 @@ void stepper_begin(Stepper *m, uint8_t in1, uint8_t in2, uint8_t in3, uint8_t in
 void stepper_set_profile(Stepper *m, const StepperPerfil *p);
 void stepper_get_profile(const Stepper *m, StepperPerfil *p);
 void stepper_set_speed(Stepper *m, uint32_t steps_per_s);  // só a vmax
+// Limite por cima do perfil (anti-travamento): o motor anda no MENOR entre
+// a vmax do perfil e o limite. Vale NA HORA, inclusive no meio do movimento
+// (acelera ou desacelera pela rampa até ele). 0 = sem limite.
+void stepper_set_limit(Stepper *m, uint32_t steps_per_s);
+uint32_t stepper_limit(const Stepper *m);
 
 // ---------- movimento sem bloqueio ----------
 // Anda 'steps' (sinal = sentido) com o perfil atual. false se já estava andando.
@@ -90,6 +96,7 @@ uint32_t stepper_moves(const Stepper *m);
 void stepper_stop(Stepper *m);   // freia pela rampa
 void stepper_abort(Stepper *m);  // para já (as bobinas continuam ligadas)
 uint32_t stepper_speed_now(Stepper *m);  // passos/s neste instante (0 parado)
+int32_t stepper_remaining(Stepper *m);   // passos que faltam no movimento (sinal = sentido; 0 parado)
 void stepper_wait(const Stepper *m);     // espera parar
 
 // Atalho bloqueante: anda e espera terminar (bobinas ficam ligadas).

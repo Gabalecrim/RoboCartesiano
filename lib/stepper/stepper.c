@@ -111,6 +111,7 @@ void stepper_begin(Stepper *m, uint8_t in1, uint8_t in2, uint8_t in3, uint8_t in
   m->sensor_disparou = false;
   m->sensor_pos = 0;
   m->rampa.faltam = 0;
+  m->vlim = 0;
   StepperPerfil p = {400, 400, 0};  // seguro: sem rampa, 400 passos/s
   stepper_set_profile(m, &p);
 
@@ -140,10 +141,25 @@ void stepper_set_speed(Stepper *m, uint32_t steps_per_s) {
   stepper_set_profile(m, &p);
 }
 
+// vmax que vale: a do perfil, ou o limite se for menor.
+static uint32_t vmaxEfetiva(const Stepper *m) {
+  return (m->vlim && m->vlim < m->perfil.vmax) ? m->vlim : m->perfil.vmax;
+}
+
+void stepper_set_limit(Stepper *m, uint32_t steps_per_s) {
+  portENTER_CRITICAL(&m->mux);
+  m->vlim = steps_per_s;
+  if (m->ativo) rampa_mudar_vmax(&m->rampa, vmaxEfetiva(m), STEPPER_TICK_HZ);
+  portEXIT_CRITICAL(&m->mux);
+}
+
+uint32_t stepper_limit(const Stepper *m) { return m->vlim; }
+
 // ---------- movimento ----------
 
 bool stepper_start(Stepper *m, int32_t steps, bool soltar_ao_fim) {
-  RampaCfg cfg = {STEPPER_TICK_HZ, m->perfil.v0, m->perfil.vmax, m->perfil.acel};
+  // A partida também fica no limite (rampa_iniciar: v0 <= vmax): mais torque.
+  RampaCfg cfg = {STEPPER_TICK_HZ, m->perfil.v0, vmaxEfetiva(m), m->perfil.acel};
   Rampa r;
   rampa_iniciar(&r, &cfg, steps);  // contas com divisão: fora da seção crítica
 
@@ -184,6 +200,13 @@ void stepper_abort(Stepper *m) {
   m->ativo = false;
   m->sensor_armado = false;
   portEXIT_CRITICAL(&m->mux);
+}
+
+int32_t stepper_remaining(Stepper *m) {
+  portENTER_CRITICAL(&m->mux);
+  int32_t f = m->ativo ? m->rampa.faltam * m->rampa.dir : 0;
+  portEXIT_CRITICAL(&m->mux);
+  return f;
 }
 
 uint32_t stepper_speed_now(Stepper *m) {
