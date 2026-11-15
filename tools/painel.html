@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bancada X e Z</title>
+<!--
+  Painel da bancada: botões para os setpoints, pela USB (Web Serial).
+  Abrir no Chrome ou no Edge (o Firefox não tem Web Serial).
+  FECHE o Serial Monitor do VS Code antes: a porta só abre em um programa.
+  Os botões só mandam os comandos de texto do main.cpp (S, R, P, q, h, A...).
+-->
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --txt: #1d2330; --sub: #5b6474; --borda: #d9dde4;
+    --pri: #1f6feb; --pri-txt: #ffffff; --ok: #1a7f37; --alarme: #cf222e; --alarme-bg: #ffebe9;
+    --log-bg: #0f1520; --log-txt: #d6e2f0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0d1117; --card: #161b22; --txt: #e6edf3; --sub: #8b949e; --borda: #30363d;
+      --pri: #2f81f7; --ok: #3fb950; --alarme: #ff7b72; --alarme-bg: #3d1417;
+      --log-bg: #010409; --log-txt: #c9d1d9;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--txt);
+         font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 16px; display: grid; gap: 14px; }
+  header { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+  h1 { font-size: 20px; margin: 0; }
+  .card { background: var(--card); border: 1px solid var(--borda); border-radius: 10px; padding: 14px; }
+  .card h2 { font-size: 15px; margin: 0 0 10px; color: var(--sub); font-weight: 600; }
+  .linha { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+  label { display: grid; gap: 4px; font-size: 13px; color: var(--sub); }
+  input { width: 110px; padding: 8px; font-size: 15px; border-radius: 6px;
+          border: 1px solid var(--borda); background: var(--bg); color: var(--txt); }
+  button { padding: 9px 14px; font-size: 15px; border-radius: 6px; cursor: pointer;
+           border: 1px solid var(--borda); background: var(--card); color: var(--txt); }
+  button.pri { background: var(--pri); color: var(--pri-txt); border-color: var(--pri); font-weight: 600; }
+  button.grande { padding: 12px 22px; font-size: 16px; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .estado { display: flex; flex-wrap: wrap; gap: 18px; font-size: 14px; }
+  .estado b { font-variant-numeric: tabular-nums; }
+  #alarme { display: none; background: var(--alarme-bg); color: var(--alarme);
+            border: 1px solid var(--alarme); border-radius: 10px; padding: 12px 14px; font-weight: 600;
+            align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  #alarme.on { display: flex; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--borda); }
+  th { color: var(--sub); font-weight: 600; font-size: 13px; }
+  td button { padding: 4px 10px; font-size: 13px; }
+  .vazio { color: var(--sub); padding: 8px; }
+  #log { background: var(--log-bg); color: var(--log-txt); border-radius: 8px; padding: 10px;
+         height: 240px; overflow-y: auto; font: 12.5px/1.45 ui-monospace, Consolas, monospace;
+         white-space: pre-wrap; word-break: break-word; }
+  .dica { color: var(--sub); font-size: 13px; margin: 8px 0 0; }
+  #conexao.ok { color: var(--ok); font-weight: 600; }
+  .sub { color: var(--sub); font-size: 13px; align-self: center; }
+  button.perigo { color: var(--alarme); border-color: var(--alarme); font-weight: 600; }
+  button.sel { outline: 2px solid var(--pri); outline-offset: 1px; font-weight: 600; }
+  .leds { display: inline-flex; gap: 6px; align-self: center; margin-left: 8px; }
+  .led { width: 30px; height: 30px; border-radius: 50%; display: inline-grid; place-items: center;
+         font-size: 12px; font-weight: 600; border: 1px solid var(--borda); color: var(--sub); background: var(--bg); }
+  .led.on { background: var(--alarme); border-color: var(--alarme); color: #fff; box-shadow: 0 0 8px var(--alarme); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Bancada: eixos X e Z</h1>
+    <div class="linha">
+      <span id="conexao">desconectado</span>
+      <button id="btnConectar" class="pri">Conectar USB</button>
+    </div>
+  </header>
+
+  <div id="alarme">
+    <span id="alarmeTxt">ALARME</span>
+    <button id="btnReconhecer">Reconhecer alarme (A)</button>
+  </div>
+
+  <section class="card">
+    <h2>Estado</h2>
+    <div class="estado">
+      <span>X motor: <b id="xMotor">—</b></span>
+      <span>X encoder: <b id="xEnc">—</b></span>
+      <span>Z: <b id="zPos">—</b></span>
+      <span>Programa: <b id="seqEstado">parado</b></span>
+      <span>Curso: <b id="curso">X 30 a 220 mm, Z 0 a 80 mm</b></span>
+    </div>
+    <div class="linha" style="margin-top:12px">
+      <button data-cmd="q" class="perigo req">■ Parar (freando)</button>
+      <button data-cmd="l" class="req" title="X para na hora e solta; o Z para e continua segurando">Parar na hora (l)</button>
+      <button data-cmd="P" class="req">Pausar / continuar</button>
+      <button data-cmd="x" class="req">Mostrar posição</button>
+      <button data-cmd="S" class="req">Atualizar lista</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Eixo X (manual)</h2>
+    <div class="linha">
+      <label>Voltas<input id="inVoltas" type="number" step="0.25" min="0.01" value="1"></label>
+      <button data-pre="f" data-in="inVoltas" class="req">↻ Frente (f)</button>
+      <button data-pre="b" data-in="inVoltas" class="req">↺ Trás (b)</button>
+      <label>Ir para X (mm)<input id="inXir" type="number" step="0.5" min="30" max="220" value="120"></label>
+      <button data-pre="x" data-in="inXir" class="pri req">Ir</button>
+      <button data-cmd="r" class="req" data-confirm="Zerar motor e encoder aqui? A referência do homing se perde.">Zerar aqui (r)</button>
+    </div>
+    <p class="dica">f e b soltam as bobinas ao terminar. "Ir para X" precisa de homing. Comando 'x' sozinho mostra a posição.</p>
+  </section>
+
+  <section class="card">
+    <h2>Rampa do X</h2>
+    <div class="linha">
+      <label>Velocidade máx. (passos/s)<input id="inVel" type="number" step="10" min="1" max="650" value="650"></label>
+      <button data-pre="v" data-in="inVel" class="req">Aplicar (v)</button>
+      <label>Aceleração (passos/s², 0 = sem rampa)<input id="inAcel" type="number" step="100" min="0" value="1500"></label>
+      <button data-pre="a" data-in="inAcel" class="req">Aplicar (a)</button>
+      <label>Partida (passos/s)<input id="inPart" type="number" step="10" min="1" value="300"></label>
+      <button data-pre="n" data-in="inPart" class="req">Aplicar (n)</button>
+      <button data-cmd="v" class="req">Mostrar rampa</button>
+    </div>
+    <p class="dica">Limite medido do X: 650 passos/s (700 perde passo). Acima disso o ESP32 limita.</p>
+  </section>
+
+  <section class="card">
+    <h2>Homing e calibração do X</h2>
+    <div class="linha">
+      <button data-cmd="h" class="pri req">Homing X (h)</button>
+      <label>Ciclos<input id="inCal" type="number" step="1" min="1" value="3"></label>
+      <button data-pre="c" data-in="inCal" class="req">Auto calibração (c)</button>
+      <button data-cmd="s" class="req">Mostrar chaves (s)</button>
+    </div>
+    <div class="linha" style="margin-top:10px">
+      <label>Distância (mm)<input id="inDist" type="number" step="1" min="1" value="100"></label>
+      <button data-pre="d" data-in="inDist" class="req">1. Andar para medir (d)</button>
+      <label>Medida real (mm)<input id="inMed" type="number" step="0.05" min="0" placeholder="ex.: 99.6"></label>
+      <button data-pre="m" data-in="inMed" data-obrig="1" class="req">2. Enviar medida (m)</button>
+      <button data-cmd="k" class="req">Mostrar calibração (k)</button>
+      <button data-cmd="k0" class="req" data-confirm="Voltar a calibração do X ao nominal (256 passos/mm)?">Nominal (k0)</button>
+    </div>
+    <p class="dica">Calibração de distância: (1) o ESP32 faz o homing, afasta 2 mm e espera 5 s para você marcar o carro; depois anda a distância. (2) Meça o deslocamento real desde a marca e envie. Qualquer comando durante o homing ou a calibração cancela.</p>
+  </section>
+
+  <section class="card">
+    <h2>Eixo Z (malha aberta, chave de homing embaixo)</h2>
+    <div class="linha">
+      <button data-cmd="ZH" class="pri req">Homing Z</button>
+      <button data-cmd="Z-10" class="req">▲ Sobe 10 mm</button>
+      <button data-cmd="Z-1" class="req">▲ Sobe 1 mm</button>
+      <button data-cmd="Z+1" class="req">▼ Desce 1 mm</button>
+      <button data-cmd="Z+10" class="req">▼ Desce 10 mm</button>
+      <button data-cmd="ZR" class="req">Zerar aqui (topo = Z 0)</button>
+    </div>
+    <div class="linha" style="margin-top:10px">
+      <label>Ir para Z (mm)<input id="inZir" type="number" step="0.5" min="0" max="80" value="0"></label>
+      <button id="btnZir" class="req">Ir</button>
+      <button data-cmd="Z" class="req">Mostrar Z</button>
+      <button data-cmd="ZL" class="perigo req" data-confirm="Soltar as bobinas do Z? Sem corrente o Z pode CAIR e a referência se perde.">Soltar Z (cai!)</button>
+    </div>
+    <div class="linha" style="margin-top:10px">
+      <label>Velocidade (passos/s)<input id="inZV" type="number" step="10" min="1" max="650" value="300"></label>
+      <button data-pre="ZV" data-in="inZV" class="req">Aplicar (ZV)</button>
+      <label>Aceleração (passos/s²)<input id="inZA" type="number" step="50" min="0" value="600"></label>
+      <button data-pre="ZA" data-in="inZA" class="req">Aplicar (ZA)</button>
+      <label>Partida (passos/s)<input id="inZN" type="number" step="10" min="1" value="150"></label>
+      <button data-pre="ZN" data-in="inZN" class="req">Aplicar (ZN)</button>
+    </div>
+    <div class="linha" style="margin-top:10px">
+      <label>Distância (mm)<input id="inZD" type="number" step="1" min="1" max="79" value="50"></label>
+      <button data-pre="ZD" data-in="inZD" class="req">1. Descer para medir (ZD)</button>
+      <label>Medida real (mm)<input id="inZM" type="number" step="0.05" min="0" placeholder="ex.: 49.6"></label>
+      <button data-pre="ZM" data-in="inZM" data-obrig="1" class="req">2. Enviar medida (ZM)</button>
+      <button data-cmd="ZK" class="req">Calibração (ZK)</button>
+      <button data-cmd="ZK0" class="req" data-confirm="Voltar a calibração do Z ao nominal (24 mm/volta)?">Nominal (ZK0)</button>
+    </div>
+    <p class="dica">"Homing Z" DESCE até a chave e define Z = 80 mm (fundo) nela: confira que não há nada embaixo do braço. O homing do X e o Executar também fazem, se faltar, e depois sobem o Z ao topo (Z = 0). "Zerar aqui" é a referência manual, sem a chave. Sem referência, Sobe/Desce não têm limite de curso. As bobinas do Z ficam sempre ligadas (o fuso de alto avanço não segura sozinho).</p>
+  </section>
+
+  <section class="card">
+    <h2>Testador de motor (bobinas da ULN2003)</h2>
+    <div class="linha">
+      <span class="sub">Motor:</span>
+      <button id="btnTX" data-cmd="TX" class="req sel">X</button>
+      <button id="btnTZ" data-cmd="TZ" class="req">Z</button>
+      <span class="leds" aria-label="LEDs A a D da ULN2003">
+        <span class="led" id="ledA">A</span><span class="led" id="ledB">B</span><span class="led" id="ledC">C</span><span class="led" id="ledD">D</span>
+      </span>
+      <span id="tGpio" class="sub"></span>
+    </div>
+    <div class="linha" style="margin-top:10px">
+      <button data-cmd="1" class="req">IN1</button>
+      <button data-cmd="2" class="req">IN2</button>
+      <button data-cmd="3" class="req">IN3</button>
+      <button data-cmd="4" class="req">IN4</button>
+      <button data-cmd="o" class="req">◀ Fase anterior</button>
+      <button data-cmd="p" class="req">Próxima fase ▶</button>
+      <button data-cmd="T0" class="pri req">Fim do teste</button>
+    </div>
+    <div class="linha" style="margin-top:10px">
+      <button id="btnGiroF" class="req">Girar ↻ (f)</button>
+      <button id="btnGiroB" class="req">Girar ↺ (b)</button>
+      <span id="tGiro" class="sub">X: 1 volta</span>
+    </div>
+    <p class="dica">IN1..IN4 ligam só aquela entrada; as fases ligam duas por vez, na ordem do giro. Os LEDs acima mostram o que <b>deve</b> acender na placa da ULN2003: compare. "Fim do teste" solta o X e volta a segurar o Z. Testar o Z perde a referência dele e, com uma bobina só, o Z pode descer: segure o eixo. Girar: no X, 1 volta (f / b); no Z, 5 mm (desce / sobe).</p>
+  </section>
+
+  <section class="card">
+    <h2>Testes do X (rampa e encoder)</h2>
+    <div class="linha">
+      <label>Até (passos/s, vazio = 800)<input id="inW" type="number" step="50" min="500" placeholder="800"></label>
+      <button data-pre="w" data-in="inW" class="req">Varredura de velocidade (w)</button>
+      <label>Distância (mm, vazio = 30)<input id="inG" type="number" step="5" min="1" placeholder="30"></label>
+      <button data-pre="g" data-in="inG" class="req">Gravar curva CSV (g)</button>
+    </div>
+    <div class="linha" style="margin-top:10px">
+      <label>Voltas<input id="inT" type="number" step="1" min="1" value="1"></label>
+      <button data-pre="t" data-in="inT" class="req">Medir velocidade (t)</button>
+      <button data-cmd="e" class="req">Monitor do encoder liga/desliga (e)</button>
+    </div>
+    <p class="dica">Varredura: vaivém subindo a velocidade até perder passo (proteção contra colisão desligada durante o teste). Curva: CSV no registro, velocidade comandada x medida. Monitor do encoder: gire o eixo devagar com a mão e veja A e B no registro.</p>
+  </section>
+
+  <section class="card">
+    <h2>Adicionar setpoint</h2>
+    <div class="linha">
+      <label>X (mm, centro do braço)<input id="inX" type="number" step="0.1" min="30" max="220" value="120"></label>
+      <label>Z (mm, 0 = topo)<input id="inZ" type="number" step="0.1" min="0" max="80" value="0"></label>
+      <label>Velocidade (mm/s, 0 = padrão)<input id="inV" type="number" step="0.1" min="0" value="0"></label>
+      <label>Espera no ponto (ms)<input id="inE" type="number" step="100" min="0" value="0"></label>
+      <button id="btnAdicionar" class="pri grande req">Adicionar setpoint</button>
+    </div>
+    <p class="dica">Enter em qualquer campo também adiciona. Um eixo por vez: para subir, o Z sobe antes de o X andar; para descer, o X anda e o Z desce por último. Fora do curso, o ESP32 recusa (aparece no registro).</p>
+  </section>
+
+  <section class="card">
+    <h2>Programa</h2>
+    <div id="tabela"><div class="vazio">conecte para ver o programa salvo na placa</div></div>
+    <div class="linha" style="margin-top:12px">
+      <label>Ciclos (0 = sem fim)<input id="inCiclos" type="number" step="1" min="0" value="1"></label>
+      <button id="btnExecutar" class="pri grande req">Executar programa</button>
+      <button id="btnLimpar" class="req">Apagar tudo</button>
+    </div>
+    <p class="dica">Sem homing feito, o ESP32 faz o homing antes de começar.</p>
+  </section>
+
+  <section class="card">
+    <h2>Registro da serial</h2>
+    <div id="log"></div>
+    <div class="linha" style="margin-top:10px">
+      <label>Comando manual<input id="inCmd" style="width:220px" placeholder="ex.: x80"></label>
+      <button id="btnEnviar" class="req">Enviar</button>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  let porta = null, escritor = null, leitor = null;
+  let pontos = [];
+
+  // ---------- registro ----------
+  const log = $('log');
+  function registrar(txt) {
+    const fim = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
+    log.textContent += txt + '\n';
+    if (log.textContent.length > 60000) log.textContent = log.textContent.slice(-40000);
+    if (fim) log.scrollTop = log.scrollHeight;
+  }
+
+  function habilitar(on) {
+    document.querySelectorAll('.req').forEach((b) => { b.disabled = !on; });
+  }
+  habilitar(false);
+
+  // ---------- serial ----------
+  async function conectar() {
+    if (!('serial' in navigator)) {
+      alert('Este navegador não tem Web Serial. Abra no Chrome ou no Edge.');
+      return;
+    }
+    try {
+      porta = await navigator.serial.requestPort();
+      await porta.open({ baudRate: 115200 });
+    } catch (e) {
+      registrar('# nao abriu a porta: ' + e.message +
+                ' (o Serial Monitor do VS Code esta aberto? feche-o)');
+      porta = null;
+      return;
+    }
+    escritor = porta.writable.getWriter();
+    $('conexao').textContent = 'conectado';
+    $('conexao').className = 'ok';
+    $('btnConectar').textContent = 'Desconectar';
+    habilitar(true);
+    registrar('# conectado');
+    lerSempre();
+    setTimeout(() => enviar('S'), 600);  // mostra o programa salvo
+  }
+
+  async function desconectar() {
+    try { if (leitor) await leitor.cancel(); } catch (e) {}
+    try { if (escritor) { escritor.releaseLock(); } } catch (e) {}
+    try { if (porta) await porta.close(); } catch (e) {}
+    porta = escritor = leitor = null;
+    $('conexao').textContent = 'desconectado';
+    $('conexao').className = '';
+    $('btnConectar').textContent = 'Conectar USB';
+    habilitar(false);
+    registrar('# desconectado');
+  }
+
+  async function lerSempre() {
+    const dec = new TextDecoder();
+    let resto = '';
+    while (porta && porta.readable) {
+      leitor = porta.readable.getReader();
+      try {
+        for (;;) {
+          const { value, done } = await leitor.read();
+          if (done) break;
+          resto += dec.decode(value, { stream: true });
+          let i;
+          while ((i = resto.search(/\r?\n/)) >= 0) {
+            const linha = resto.slice(0, i);
+            resto = resto.slice(resto[i] === '\r' ? i + 2 : i + 1);
+            tratarLinha(linha);
+          }
+        }
+      } catch (e) {
+        registrar('# erro de leitura: ' + e.message);
+        break;
+      } finally {
+        leitor.releaseLock();
+      }
+    }
+  }
+
+  async function enviar(cmd) {
+    if (!escritor) return;
+    registrar('> ' + cmd);
+    await escritor.write(new TextEncoder().encode(cmd + '\r\n'));  // comandos são por linha
+  }
+
+  // ---------- respostas do ESP32 ----------
+  function tratarLinha(l) {
+    registrar(l);
+
+    // Cabeçalho: "programa X (centro do braco, 30 a 220 mm) Z (topo 0 a 80 mm): 3 ponto(s)"
+    let m = l.match(/^programa X \(centro do braco, ([\d.]+) a ([\d.]+) mm\) Z \(topo 0 a ([\d.]+) mm\): (\d+) ponto/);
+    if (m) {
+      pontos = [];
+      $('curso').textContent = `X ${m[1]} a ${m[2]} mm, Z 0 a ${m[3]} mm`;
+      $('inX').min = m[1]; $('inX').max = m[2];
+      $('inXir').min = m[1]; $('inXir').max = m[2];
+      $('inZ').max = m[3]; $('inZir').max = m[3];
+      desenharTabela();
+      return;
+    }
+    // Ponto: "   1: X  120.00 mm  Z  40.00 mm   padrao (X 2.54, Z 7.62 mm/s)   espera 0 ms"
+    m = l.match(/^\s*(\d+): X\s+(-?[\d.]+) mm\s+Z\s+(-?[\d.]+) mm\s+(.+?)\s+espera (\d+) ms/);
+    if (m) {
+      pontos.push({ n: +m[1], x: m[2], z: m[3], vel: m[4].replace('padrao', 'padrão'), espera: m[5] });
+      desenharTabela();
+      return;
+    }
+    // Z: "Z: 40.00 mm" (linha de estado e 'Z'), "Z: sem ref" / "Z: SEM REFERENCIA"
+    m = l.match(/\bZ: (-?[\d.]+) mm/);
+    if (m) $('zPos').textContent = m[1] + ' mm';
+    if (/\bZ: (sem ref|SEM REFERENCIA)/.test(l)) $('zPos').textContent = 'sem referência';
+    m = l.match(/^\[seq\] chegou: .* Z (-?[\d.]+) mm/);
+    if (m) $('zPos').textContent = m[1] + ' mm';
+    // Linha de estado: "... X: 120.00 mm (encoder 119.90 mm)"
+    m = l.match(/X: (-?[\d.]+) mm \(encoder (-?[\d.]+) mm\)/);
+    if (m) { $('xMotor').textContent = m[1] + ' mm'; $('xEnc').textContent = m[2] + ' mm'; }
+    m = l.match(/^\[seq\] chegou: X (-?[\d.]+) mm \(encoder (-?[\d.]+) mm\)/);
+    if (m) { $('xMotor').textContent = m[1] + ' mm'; $('xEnc').textContent = m[2] + ' mm'; }
+
+    if (/^\[seq\] ciclo (\d+), ponto (\d+)\/(\d+)/.test(l)) {
+      const s = l.match(/ciclo (\d+), ponto (\d+)\/(\d+) -> X ([\d.-]+) mm Z ([\d.-]+)/);
+      if (s) $('seqEstado').textContent = `ciclo ${s[1]}, ponto ${s[2]} de ${s[3]} → X ${s[4]}, Z ${s[5]} mm`;
+    }
+    if (/^\[seq\] pausado/.test(l)) $('seqEstado').textContent = 'pausado';
+    if (/^-- programa (terminado|cancelado)/.test(l)) {
+      $('seqEstado').textContent = l.includes('terminado') ? 'terminado' : 'cancelado';
+    }
+    if (/^-- pausando/.test(l)) $('seqEstado').textContent = 'pausando…';
+    if (/^-- continuando/.test(l)) $('seqEstado').textContent = 'continuando';
+
+    if (/^!!! ALARME: /.test(l)) {
+      $('alarmeTxt').textContent = l.replace(/^!!!\s*/, '');
+      $('alarme').classList.add('on');
+    }
+    if (/alarme reconhecido/.test(l)) $('alarme').classList.remove('on');
+
+    // Testador: "testador no motor Z: IN1..IN4 = GPIO 14 25 26 27"
+    m = l.match(/^testador no motor (X|Z): IN1\.\.IN4 = GPIO ([\d ]+)/);
+    if (m) { escolherTeste(m[1]); $('tGpio').textContent = 'GPIO ' + m[2].trim(); acender(''); }
+    // "ligado X:  IN1 (GPIO 18, LED A)  IN2 (GPIO 19, LED B)"
+    m = l.match(/^ligado (X|Z):(.*)/);
+    if (m) {
+      escolherTeste(m[1]);
+      acender((m[2].match(/LED ([A-D])/g) || []).map((s) => s.slice(-1)).join(''));
+    }
+    if (/^-- fim do teste/.test(l) || (motorTeste === 'X' && /^-- X solto/.test(l))) acender('');
+
+    if (/^== Bancada/.test(l)) {  // a placa reiniciou
+      escolherTeste('X');
+      acender('');
+      $('alarme').classList.remove('on');
+      $('seqEstado').textContent = 'parado';
+      $('xMotor').textContent = $('xEnc').textContent = '—';
+      $('zPos').textContent = 'sem referência';
+    }
+  }
+
+  function desenharTabela() {
+    const t = $('tabela');
+    if (pontos.length === 0) {
+      t.innerHTML = '<div class="vazio">programa vazio: adicione setpoints acima</div>';
+      return;
+    }
+    let h = '<table><thead><tr><th>#</th><th>X (mm)</th><th>Z (mm)</th><th>Velocidade</th><th>Espera (ms)</th><th></th></tr></thead><tbody>';
+    for (const p of pontos) {
+      h += `<tr><td>${p.n}</td><td>${p.x}</td><td>${p.z}</td><td>${p.vel}</td><td>${p.espera}</td>` +
+           `<td><button class="req" data-apagar="${p.n}">Apagar</button></td></tr>`;
+    }
+    t.innerHTML = h + '</tbody></table>';
+    habilitar(!!escritor);
+  }
+
+  // ---------- testador de motor ----------
+  let motorTeste = 'X';
+  function escolherTeste(eixo) {
+    motorTeste = eixo;
+    $('btnTX').classList.toggle('sel', eixo === 'X');
+    $('btnTZ').classList.toggle('sel', eixo === 'Z');
+    $('tGiro').textContent = eixo === 'X' ? 'X: 1 volta' : 'Z: 5 mm (↻ desce, ↺ sobe)';
+  }
+  function acender(letras) {
+    for (const c of 'ABCD') $('led' + c).classList.toggle('on', letras.includes(c));
+  }
+  $('btnGiroF').onclick = () => enviar(motorTeste === 'X' ? 'f' : 'Z+5');
+  $('btnGiroB').onclick = () => enviar(motorTeste === 'X' ? 'b' : 'Z-5');
+
+  // ---------- botões ----------
+  $('btnConectar').onclick = () => (porta ? desconectar() : conectar());
+
+  function adicionar() {
+    const x = parseFloat($('inX').value);
+    const z = parseFloat($('inZ').value) || 0;
+    const v = parseFloat($('inV').value) || 0;
+    const e = Math.max(0, Math.round(parseFloat($('inE').value) || 0));
+    if (!isFinite(x)) { $('inX').focus(); return; }
+    enviar(`S${x} ${z} ${v} ${e}`);
+  }
+  $('btnAdicionar').onclick = adicionar;
+  $('btnZir').onclick = () => {
+    const z = parseFloat($('inZir').value);
+    if (isFinite(z) && z >= 0) enviar('Z' + z);
+  };
+  ['inX', 'inZ', 'inV', 'inE'].forEach((id) => {
+    $(id).addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && escritor) adicionar(); });
+  });
+
+  $('btnExecutar').onclick = () => {
+    const c = Math.max(0, Math.round(parseFloat($('inCiclos').value) || 0));
+    enviar(c === 1 ? 'R' : 'R' + c);
+  };
+  $('btnLimpar').onclick = () => {
+    if (confirm('Apagar todos os setpoints do programa?')) enviar('S-');
+  };
+  $('btnReconhecer').onclick = () => enviar('A');
+
+  document.addEventListener('click', (ev) => {
+    const b = ev.target.closest('button');
+    if (!b || b.disabled) return;
+    if (b.dataset.confirm && !confirm(b.dataset.confirm)) return;
+    if (b.dataset.cmd) enviar(b.dataset.cmd);
+    // Comando + valor de um campo (ex.: "f" + voltas). Campo vazio = só a letra
+    // (o ESP32 usa o padrão), exceto onde o valor é obrigatório (data-obrig).
+    if (b.dataset.pre) {
+      const campo = $(b.dataset.in);
+      const v = campo ? campo.value.trim().replace(',', '.') : '';
+      if (!v && b.dataset.obrig) { campo.focus(); return; }
+      enviar(b.dataset.pre + v);
+    }
+    if (b.dataset.apagar) enviar('S-' + b.dataset.apagar);
+  });
+
+  function enviarManual() {
+    const c = $('inCmd').value.trim();
+    if (c) { enviar(c); $('inCmd').value = ''; }
+  }
+  $('btnEnviar').onclick = enviarManual;
+  $('inCmd').addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && escritor) enviarManual(); });
+
+  if (navigator.serial) {
+    navigator.serial.addEventListener('disconnect', () => { if (porta) desconectar(); });
+  }
+})();
+</script>
+</body>
+</html>
