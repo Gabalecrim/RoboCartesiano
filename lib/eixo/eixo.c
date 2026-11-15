@@ -63,11 +63,16 @@ bool eixo_chave(Eixo *e) {
 
 // Espera o motor terminar o movimento já iniciado, vigiando o cancelamento
 // e (se janela > 0) o encoder: 'janela' passos sem ele mudar = travou.
+// A 1ª janela de cada trecho NÃO conta (2026-11-15): cada trecho do homing
+// inverte o sentido, e a folga de inversão (fuso, acoplamento, caixa do
+// 28BYJ-48) deixa o encoder parado no começo. Isso dava "TRAVOU no homing"
+// falso; com o travamento desligado o homing terminava normal.
 typedef enum { ESPERA_FIM, ESPERA_TRAVOU, ESPERA_CANCELADO } Espera;
 
 static Espera esperar(Eixo *e, const EixoHomingCfg *cfg, int32_t janela) {
   int32_t pos_ck = stepper_position(e->motor);
   int32_t enc_ck = contagem(e);
+  bool primeira = true;  // 1ª janela: só refaz a referência (folga)
   while (stepper_busy(e->motor)) {
     if (cancelado(cfg)) {
       stepper_abort(e->motor);
@@ -78,10 +83,11 @@ static Espera esperar(Eixo *e, const EixoHomingCfg *cfg, int32_t janela) {
       int32_t andou = pos > pos_ck ? pos - pos_ck : pos_ck - pos;
       if (andou >= janela) {
         int32_t enc = contagem(e);
-        if (enc == enc_ck) {
+        if (enc == enc_ck && !primeira) {
           stepper_abort(e->motor);
           return ESPERA_TRAVOU;
         }
+        primeira = false;
         pos_ck = pos;
         enc_ck = enc;
       }
