@@ -2,7 +2,7 @@
 
 Registro de onde paramos, para o grupo retomar. Atualizar a cada sessão.
 
-**Última sessão:** 10/11/2026
+**Última sessão:** 14/11/2026
 
 ---
 
@@ -14,9 +14,65 @@ Registro de onde paramos, para o grupo retomar. Atualizar a cada sessão.
 | 2. Motor de passo | 8/8, rampa 14/14 | rampa + sem bloqueio **não testados na placa** | checkpoint do Passo 3 do Módulo 2 |
 | 3. Homing + auto calibração | homing 17/17 | **não testado** (falta instalar a chave no GPIO 36) | instalar a chave e fazer o checkpoint do Módulo 3 |
 | 4. Calibração de distância | calib 10/10 | **não testado** | `d100` + `m<medida>` na placa |
+| 5. Setpoints em mm (X e Z) | setpoint 25/25 | **não testado** | checkpoint "Setpoints em mm (X e Z)" do README |
+| 6. Proteção contra colisão (X) | colisao 12/12 | **não testado** | checkpoint "Proteção contra colisão" do README |
+| 7. Eixo Z (malha aberta + homing) | (usa setpoint, calib e homing) | **não testado**, motor e chave do Z ainda não ligados | checkpoint "Eixo Z" do README |
 
 O firmware (`pio run -e esp32dev`) compila **sem erros e sem avisos** (`-Wall -Wextra`).
-Os testes do PC (`pio test -e native`) rodam (gcc instalado via WinLibs).
+Os testes do PC (`pio test -e native`) rodam: 115/115 (gcc instalado via WinLibs).
+
+---
+
+## O que foi feito em 14/11/2026
+
+### Eixo Z em malha aberta
+- Motor Z nos GPIOs 14, 25, 26, 27 (os 25/26 eram do encoder Z, que saiu: malha aberta;
+  o Gab trocou o IN1 de 23 para 14). O 14 dá pulsos no boot: no máximo um tranco no Z.
+- **Homing do Z** (`ZH`): chave NA **embaixo** (Z = 80 mm na chave; o zero continua no topo), GPIO 4 (escolha do Gab), pull-down externo de 10 kΩ.
+  Usa `lib/homing` + `lib/eixo` sem encoder (`enc = NULL`, sem janela de travamento) e
+  termina segurando (`EixoHomingCfg.segurar`). `h` e `R` fazem o `ZH` antes, se faltar.
+  `Z_TEM_CHAVE = false` volta para a referência manual (`ZR`).
+- Fuso igus de alto avanço, 8 entradas x ~3 mm = 24 mm/volta (85,33 passos/mm),
+  **a confirmar** com `ZD50` + `ZM<medida>`. Curso 80 mm, Z = 0 no topo.
+- Bobinas do Z **sempre ligadas** (fuso de alto avanço não trava). Alarme do X e `l`
+  param o Z sem soltar. `ZL` solta (o Z cai e perde a referência).
+- Referência manual (`ZR` no topo) continua valendo; sem proteção contra colisão no Z.
+- Setpoints agora têm X e Z (`S<x> <z> [mm/s] [ms]`); o sequenciador anda um eixo por
+  vez (Z sobe primeiro / X anda primeiro quando o Z desce). Programa do formato antigo é apagado.
+- O homing do X sobe o Z ao topo antes (com `ZH`, se o Z estiver sem referência).
+- Painel (`tools/painel.html`): campo Z, coluna Z, quadro do Z (homing, sobe/desce, zerar, ir).
+
+### A decidir / medir
+- Velocidade máxima real do Z (650 passos/s assumido, igual ao X).
+- Se o Z desce sozinho sem corrente com a garra montada (decide `Z_SEGURAR`).
+- Saídas livres para o Y e a garra: 13, 16, 17, 23 (faltam 5); o 39 está livre só como entrada.
+- Testador de motor no painel: `TX` / `TZ` escolhe o motor de 1..4, p, o; `T0` termina.
+- Z andava ao contrário: `Z_DESCE = -1`. Não subia bem a 650 passos/s: padrão 300, partida 150,
+  aceleração 600 (comandos novos `ZA` e `ZN`); homing do Z a 250 / 120.
+- Painel com todos os comandos da serial (X manual, rampa, homing/calibração, Z, testes).
+
+---
+
+## O que foi feito em 12/11/2026
+
+### Setpoints em mm (`lib/setpoint`)
+- Coordenada X = **centro do braço**, em mm: 30 mm na chave (`X_HOME_MM`), curso
+  de 190 mm (`CURSO_X_MM`), então X vai de 30 a 220 mm. `x`, `w` e `g` passaram a
+  usar essa coordenada (pontos do `w`: 40 e 70 mm = os mesmos 10 e 40 mm da chave).
+- Programa de até 32 pontos (X, velocidade mm/s, espera ms), salvo na flash.
+- Sequenciador (máquina de estados pura): PARADO → MOVENDO → ESPERANDO → ... → FIM,
+  com pausa (freia e continua do mesmo ponto), cancelamento e ciclos (`R0` = sem fim).
+- Em cada ponto, motor × encoder: diferença > 1 mm cancela e pede homing.
+- Comandos novos: `S`, `S<mm> [mm/s] [ms]`, `S-n`, `S-`, `R[n]`, `P`.
+
+### Proteção contra colisão (`lib/colisao`)
+- Erro de seguimento (encoder × passos) vigiado em todo movimento: > 6 contagens
+  (0,6 mm) em 2 leituras seguidas = colisão. Motor para e solta, programa cancela,
+  referência perdida, ALARME (LED GPIO 2 piscando + serial). `A` reconhece; depois `h`.
+- `stepper_moves()` (contador de movimentos) para o monitor refazer a referência a
+  cada movimento, mesmo quando um zero (homing) acontece entre dois movimentos.
+- Homing com `TRAVOU` também dá alarme. Desligada só na varredura `w`.
+- Limite a ajustar na bancada: `A` sem alarme mostra o erro máximo do último movimento.
 
 ---
 
@@ -98,7 +154,7 @@ Versão simples e didática:
   `m99.6`: medida real → novos passos/mm e contagens/mm, salvos na flash (`Preferences`).
 - `k`/`k0` mostra/volta ao nominal; `x50` vai para 50 mm (precisa de homing).
 - Conta em `calib_distancia()` (lib/calib, testada no PC). Recusa medida > 10% do pedido.
-- `CURSO_X_MM = 200` é provisório: ajustar ao curso real.
+- `CURSO_X_MM` = 190 mm (curso real, 12/11/2026).
 
 ### Motor: rampa e movimento sem bloqueio
 - `lib/rampa`: perfil trapezoidal em inteiros (Q32 passos/tique), sem `float` (roda na
@@ -109,9 +165,9 @@ Versão simples e didática:
 - `lib/homing` agora planeja por **trechos** (até acionar / até soltar / recuo extra),
   executados pelo motor sem bloqueio; `eixo.c` vigia encoder (travou) e cancelamento.
 - Bancada: `f`/`b`/`x` não bloqueiam; `q` freia; `v`/`a`/`n` ajustam a rampa
-  (padrão: partida 300, máxima 520 passos/s, aceleração 1500 passos/s²).
+  (padrão: partida 300, máxima 650 passos/s = o limite medido, aceleração 1500 passos/s²).
 - Varredura `w` na bancada: 650 passos/s ok, 700 perde passo, com aceleração de 1000,
-  1500 ou 2500: o limite é o torque do 28BYJ-48 a 5 V, não a rampa. Trabalho: 520.
+  1500 ou 2500: o limite é o torque do 28BYJ-48 a 5 V, não a rampa. Padrão: 650 (o máximo, decisão de 12/11/2026; antes 520 = 80%).
 - Funções da interrupção conferidas em `.iram0.text` no binário.
 - Ainda bloqueiam (esperam terminar, mas com o motor na interrupção): `h`, `c`, `d`, `t`.
 

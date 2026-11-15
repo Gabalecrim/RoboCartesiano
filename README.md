@@ -341,17 +341,195 @@ salvo na memoria (vale depois do reset). Confira com x<mm>, ex.: x50
 | `d`, `d100` | calibração de distância (padrão 100 mm) |
 | `m99.6` | informa a medida real e aplica |
 | `k` / `k0` | mostra a calibração / volta ao nominal |
-| `x50` / `x` | vai para 50 mm da chave / só mostra a posição (precisa de homing) |
+| `x120` / `x` | vai para X = 120 mm / só mostra a posição (precisa de homing) |
 
-Depois do homing, a linha de estado mostra a posição em mm pelo motor e pelo encoder.
-
-`CURSO_X_MM` (200 mm) no `main.cpp` limita o `d` e o `x`: **ajustar ao curso real do eixo**.
+Depois do homing, a linha de estado mostra X em mm pelo motor e pelo encoder.
 
 ✅ **Checkpoint:**
 1. `d100`, medir, `m<valor>`: aceita e mostra os valores novos.
-2. `x50` e medir a partir da chave: ~50 mm. `x0` volta à chave.
+2. `x80` e medir a partir da chave: o carro anda ~50 mm. `x30` volta à chave.
 3. Repetir `d100`: o erro deve cair para perto de 0%.
 4. Reset (botão EN): o boot mostra a calibração salva.
+
+## Eixo Z (malha aberta)
+
+Motor Z (28BYJ-48 + ULN2003) nos GPIOs **14, 25, 26, 27** (IN1..IN4). Sem
+encoder. Chave de homing **embaixo** (fundo do curso, Z = 80 mm), no **GPIO 4** (`HOME_Z`), ligada igual à
+do X: chave NA para 3V3 + resistor de 10 kΩ do GPIO para o GND (acionada = HIGH).
+
+- **Fuso igus de alto avanço**: 8 entradas, ~3 mm entre roscas, Ø ~6 mm.
+  Avanço = 8 × 3 = **24 mm/volta** → **85,33 passos/mm** (`Z_AVANCO_MM`).
+  Conferir com `ZD` (abaixo).
+- **Coordenada**: Z = descida a partir do topo. **0 = topo** (seguro),
+  **80 mm = embaixo** (`CURSO_Z_MM`).
+- **Bobinas sempre ligadas** (`Z_SEGURAR`): fuso de alto avanço não trava
+  sozinho, sem corrente o Z desce pelo peso. O motor esquenta (~1 W).
+- **Homing do Z (`ZH`)**: **desce** rápido até a chave, sobe 2 mm além de ela soltar
+  e volta devagar; onde a chave aciona vira **Z = 80 mm** (`Z_HOME_MM`) e o motor **continua
+  segurando**. A coordenada não muda: Z = 0 continua no topo. **Confira que não há nada
+  embaixo do braço** antes do homing do Z.
+  O `h` (homing do X) e o `R` fazem o `ZH` antes, se o Z estiver sem referência.
+  Ao ligar a placa, o Z está sem referência.
+- Sem encoder o homing do Z não vê travamento: se a chave não acionar, o Z desce
+  até curso + 20 mm (o 28BYJ-48 só pula passo no batente) e dá erro `CURSO`.
+- **Referência manual** (sem a chave): leve o Z ao topo e envie `ZR`.
+  Chave ainda não montada: `Z_TEM_CHAVE = false` no `main.cpp`.
+- Velocidade padrão **300 passos/s (≈ 3,5 mm/s)**, partida 150, aceleração 600: a 650 o Z
+  não subia bem (o 28BYJ-48 tem mais torque devagar). Ajuste com `ZV`, `ZA`, `ZN` (teto 650).
+  O homing do Z usa 250 / 120 passos/s.
+- **Sem encoder, não há proteção contra colisão no Z**: se perder passo, fica
+  deslocado sem aviso. Refaça o `ZH` de vez em quando.
+- O homing do X (`h`, e o `R` sem referência) sobe o Z ao topo antes.
+- `s` mostra as duas chaves (X e Z), para conferir a fiação.
+
+| Comando | Faz |
+|---|---|
+| `Z+5` / `Z-5` | desce / sobe 5 mm (vale sem referência, para levar ao topo) |
+| `ZH` | homing do Z (desce até a chave; Z = 80 mm nela) |
+| `ZR` | "aqui é o topo": Z = 0 (referência manual, sem a chave) |
+| `Z40` / `Z` | vai para Z = 40 mm (precisa de `ZH` ou `ZR`) / mostra o Z |
+| `ZV300` | velocidade do Z (passos/s, até 650) |
+| `ZA600` / `ZN150` | aceleração (`ZA0` = sem rampa) / velocidade de partida do Z |
+| `ZD`, `ZD50` | calibração: desce 1 mm, espera 5 s para marcar, desce 50 mm |
+| `ZM49.6` | medida real desde a marca: calcula e salva os passos/mm |
+| `ZK` / `ZK0` | mostra a calibração / volta ao nominal |
+| `ZL` | solta as bobinas (**o Z pode cair**; perde a referência) |
+
+`Z_DESCE = -1` (na bancada o Z andava ao contrário com +1). Se o `Z+5` subir, troque o sinal no `main.cpp`.
+Se a calibração der muito longe de 24 mm/volta, ela é recusada e mostra o
+avanço medido: troque `Z_AVANCO_MM`.
+
+✅ **Checkpoint:**
+1. Ao ligar: o Z fica parado e firme (bobinas ligadas), `Z: sem ref`.
+2. `s` com a chave Z solta e apertada com a mão: `solta` / `ACIONADA`.
+3. `Z+5` desce ~5 mm; `Z-5` sobe (senão troque `Z_DESCE`). Deixe o Z uns 20 mm acima do fundo.
+4. `ZH`: desce, aperta a chave, sobe um pouco, volta devagar e para: `Z: 80.00 mm`.
+   Depois `Z0` sobe ao topo.
+   Teste o cancelamento: `ZH` e Enter com uma tecla no meio (o Z para e segura).
+5. `ZD50`, marcar, medir, `ZM<valor>`: confere o avanço (~24 mm/volta).
+6. `Z80` e `Z0` algumas vezes, depois `ZH`: "chave a N passos de onde estava antes"
+   perto de 0 = o Z não perdeu passo.
+7. `ZL`: o Z desce sozinho? Se **não** descer com a garra montada, dá para
+   pensar em soltar as bobinas parado (`Z_SEGURAR = false`) e não esquentar.
+
+## Setpoints em mm (X e Z)
+
+Todas as posições são em mm. X é o **centro do braço**, Z é a descida a
+partir do topo:
+
+```
+ chave (homing)                          fim do curso
+ |<---------------- carro anda 190 mm ---------------->|
+ X = 30 mm                                       X = 220 mm
+ (na chave, o centro do braço está a 30 mm dela)
+
+ Z = 0 (topo)  ...  Z = 80 mm (embaixo)
+```
+
+`X_HOME_MM` (30), `CURSO_X_MM` (190) e `CURSO_Z_MM` (80) ficam no `main.cpp`.
+A conversão mm ↔ passos e o programa de pontos ficam em `lib/setpoint`
+(lógica pura, `pio test -e native -f test_setpoint`).
+
+| Comando | Faz |
+|---|---|
+| `S` | lista o programa |
+| `S120 40` | acrescenta X = 120 mm, Z = 40 mm (velocidade padrão, sem espera) |
+| `S120` | X = 120 mm com Z = 0 (topo) |
+| `S120 40 1.5 2000` | idem a 1,5 mm/s, espera 2 s no ponto (velocidade 0 = padrão) |
+| `S-2` / `S-` | apaga o ponto 2 / o programa todo |
+| `R` / `R3` / `R0` | executa 1 vez / 3 vezes / sem fim (homing do Z e do X se faltar) |
+| `P` | pausa (freia) / continua do mesmo ponto |
+| `q` / `l` | cancela freando / cancela e solta o X (o Z continua segurando) |
+
+**Um eixo por vez**, para o braço não arrastar em nada:
+
+| O ponto pede | Ordem |
+|---|---|
+| Z subir (alvo acima do Z atual) | Z sobe → depois X anda |
+| Z descer ou ficar | X anda → depois Z desce |
+
+- O programa (até 32 pontos) fica **salvo na flash**; ao ligar é conferido
+  e mostrado. Um programa do formato antigo (só X) é apagado.
+- Pontos fora do curso de X ou Z são recusados. A velocidade vale para os
+  dois eixos, cada um limitado ao seu máximo (X ~2,5 mm/s, Z ~7,6 mm/s).
+- Em cada ponto o encoder do X confere a posição: diferença maior que 1 mm
+  (`SEQ_TOL_MM`) cancela o programa, avisa **PERDEU PASSO** e pede homing.
+- Enquanto o programa roda, os comandos de motor são recusados; pausado,
+  dá para mexer à mão (`f`, `b`, `x`, `h`, `Z+`/`Z-`) e continuar com `P`:
+  os alvos são absolutos e a ordem das fases é refeita a partir do Z atual.
+
+✅ **Checkpoint:**
+1. `S50 0`, `S150 60 0 2000`, `S100 0 1 0`, `S`: lista os 3 pontos.
+2. `R`: homing do Z, do X, vai a X 50; X anda a 150 e **depois** o Z desce a 60
+   (espera 2 s); o Z **sobe primeiro** e depois o X vai a 100 devagar.
+3. `R0` e `P` no meio de um movimento: freia; `P` continua; `q` cancela.
+4. Reset: o programa continua lá (`S`); o `R` refaz os dois homings.
+5. `S10` e `S100 90`: recusados (X / Z fora do curso).
+
+### Painel com botões (`tools/painel.html`)
+
+Para não digitar os comandos: abra `tools/painel.html` no **Chrome ou Edge**
+(duplo clique no arquivo), **feche o Serial Monitor do VS Code** (a porta só
+abre em um programa) e clique em **Conectar USB**.
+
+- **Adicionar setpoint**: X (mm), Z (mm), velocidade (mm/s, 0 = padrão) e espera (ms).
+- **Executar programa**: com o número de ciclos (0 = sem fim).
+- Tabela do programa salvo na placa, com **Apagar** por ponto.
+- **Eixo X (manual)**: f / b com o número de voltas, ir para X, zerar (`r`).
+- **Rampa do X**: velocidade (`v`), aceleração (`a`), partida (`n`), mostrar.
+- **Homing e calibração do X**: homing (`h`), auto calibração com ciclos (`c`), chaves (`s`),
+  calibração de distância em dois passos (`d` e depois `m`), mostrar (`k`) / nominal (`k0`).
+- **Eixo Z**: **Homing Z**, sobe/desce 1 e 10 mm, **Zerar aqui (topo)**, ir para um Z,
+  soltar (`ZL`, pede confirmação), velocidade / aceleração / partida (`ZV`, `ZA`, `ZN`),
+  calibração (`ZD`, `ZM`, `ZK`, `ZK0`).
+- **Testes do X**: varredura (`w`), curva CSV (`g`), medição de velocidade (`t`), monitor
+  do encoder (`e`).
+- **Testador de motor**: escolhe X ou Z (`TX` / `TZ`), liga IN1..IN4 um por vez ou as fases
+  (`p` / `o`), mostra os LEDs A..D que devem acender na ULN2003, gira (X: 1 volta;
+  Z: 5 mm) e **Fim do teste** (`T0`: solta o X, o Z volta a segurar). Testar o Z perde
+  a referência dele: segure o eixo.
+- Parar freando (`q`), parar na hora (`l`), pausar/continuar, aviso de **ALARME** com botão de
+  reconhecer, posição X e Z e registro da serial.
+
+O painel só manda os mesmos comandos de texto (`S120 40 0 0`, `R`, `P`, `Z+1`...).
+Atenção: os comandos de setpoint são **maiúsculos** (`S`, `R`, `P`, `A`);
+`s` minúsculo é outro comando (mostra a chave).
+
+## Proteção contra colisão
+
+`lib/colisao` (lógica pura, `pio test -e native -f test_colisao`) vigia o
+**erro de seguimento** durante qualquer movimento:
+
+```
+erro = contagens lidas - passos dados x (contagens/mm ÷ passos/mm)
+```
+
+Se o conjunto bate, o 28BYJ-48 perde passo: o motor "conta", o carro não
+anda e o erro cresce. Acima de **6 contagens (0,6 mm)** em **2 leituras
+seguidas** (filtra um pico), a bancada:
+
+1. para o motor **na hora** e **solta as bobinas** (não fica empurrando o obstáculo);
+2. cancela o programa de setpoints, se estiver rodando;
+3. marca a posição como perdida (precisa de homing);
+4. liga o **ALARME**: LED da placa (GPIO 2) piscando e aviso na serial a cada 5 s.
+
+Com alarme, nenhum comando mexe no motor até reconhecer com **`A`**. Depois,
+`h` refaz a origem. `A` sem alarme mostra o maior erro do último movimento,
+bom para ajustar o limite (`COLISAO_LIMITE_CONT` no `main.cpp`).
+
+- Vale para `f`, `b`, `x`, setpoints, homing, `c`, `d` e `g` (as rotinas que
+  bloqueiam vigiam a cada 1 ms).
+- Homing que termina em `TRAVOU` também dá alarme.
+- **Desligada só na varredura `w`**, que força o motor a perder passo.
+- A referência é refeita a cada movimento: folga de inversão não se acumula.
+- A 650 passos/s (padrão), 0,6 mm de atraso = ~154 passos ≈ 0,25 s até parar.
+
+✅ **Checkpoint:**
+1. `f5` sem obstáculo: `-- parou (erro de seguimento max 2..3 cont)`, sem alarme.
+2. `f5` e segure o carro (ou o eixo do motor) com a mão: o motor para e solta,
+   `!!! ALARME: COLISAO`, LED piscando.
+3. `f`: recusado (`ALARME ativo`). `A`: reconhece, LED apaga. `h`: origem de novo.
+4. `R0` e segure o carro no meio: o programa é cancelado pelo alarme.
 
 ## Diagnóstico: medição de velocidade (`t`)
 
