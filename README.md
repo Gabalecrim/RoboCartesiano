@@ -470,30 +470,27 @@ A conversão mm ↔ passos e o programa de pontos ficam em `lib/setpoint`
 
 Para não digitar os comandos: abra `tools/painel.html` no **Chrome ou Edge**
 (duplo clique no arquivo), **feche o Serial Monitor do VS Code** (a porta só
-abre em um programa) e clique em **Conectar USB**.
+abre em um programa) e clique em **Conectar USB**. Ao conectar, o painel lê da
+placa o programa, as chaves e as velocidades.
 
-- **Adicionar setpoint**: X (mm), Z (mm), velocidade (mm/s, 0 = padrão) e espera (ms).
-- **Executar programa**: com o número de ciclos (0 = sem fim).
-- Tabela do programa salvo na placa, com **Apagar** por ponto.
-- **Eixo X (manual)**: f / b com o número de voltas, ir para X, zerar (`r`).
-- **Rampa do X**: velocidade (`v`), aceleração (`a`), partida (`n`), mostrar.
-- **Homing e calibração do X**: homing (`h`), auto calibração com ciclos (`c`), chaves (`s`),
-  calibração de distância em dois passos (`d` e depois `m`), mostrar (`k`) / nominal (`k0`).
-- **Eixo Z**: **Homing Z**, sobe/desce 1 e 10 mm, **Zerar aqui (topo)**, ir para um Z,
-  soltar (`ZL`, pede confirmação), velocidade / aceleração / partida (`ZV`, `ZA`, `ZN`),
-  calibração (`ZD`, `ZM`, `ZK`, `ZK0`).
-- **Testes do X**: varredura (`w`), curva CSV (`g`), medição de velocidade (`t`), monitor
-  do encoder (`e`).
-- **Testador de motor**: escolhe X ou Z (`TX` / `TZ`), liga IN1..IN4 um por vez ou as fases
-  (`p` / `o`), mostra os LEDs A..D que devem acender na ULN2003, gira (X: 1 volta;
-  Z: 5 mm) e **Fim do teste** (`T0`: solta o X, o Z volta a segurar). Testar o Z perde
-  a referência dele: segure o eixo.
-- Parar freando (`q`), parar na hora (`l`), pausar/continuar, aviso de **ALARME** com botão de
-  reconhecer, posição X e Z e registro da serial.
+- **Barra do topo (sempre visível)**: posição do X (e do encoder) e do Z, estado das
+  chaves X e Z (acende ao apertar), estado do programa, **PARAR** (tecla **Esc** em
+  qualquer lugar) e "Parar na hora". O aviso de **ALARME** aparece logo abaixo.
+- **Operar**: homing do X e do Z (o do Z pede confirmação, porque desce), ir para X / Z,
+  mover em passos de 1 e 10 mm (vale sem homing), definir o topo do Z à mão e soltar o Z.
+- **Programa**: novo ponto com **Usar posição atual** (leve os eixos ao ponto e copie),
+  tabela com Copiar / Apagar, Executar com ciclos, Pausar, Cancelar.
+- **Ajustes e calibração**: velocidade, aceleração e partida do X e do Z (os campos
+  mostram o valor da placa; Aplicar manda os três), calibração de distância do X e do Z
+  em dois passos (o passo 2 acende quando a placa pede a medida), auto calibração.
+- **Testes**: bobinas do X ou do Z com os LEDs A..D que devem acender, chaves, monitor do
+  encoder, varredura de velocidade, curva da rampa e medição de tempo.
+- **Registro da serial** ao lado (embaixo em tela estreita), com Copiar, Limpar e campo
+  de comando manual (↑ repete o anterior). Erros e alarmes ficam em vermelho.
 
-O painel só manda os mesmos comandos de texto (`S120 40 0 0`, `R`, `P`, `Z+1`...).
+O painel só manda os mesmos comandos de texto da serial (`S120 40 0 0`, `R`, `Z+1`...).
 Atenção: os comandos de setpoint são **maiúsculos** (`S`, `R`, `P`, `A`);
-`s` minúsculo é outro comando (mostra a chave).
+`s` minúsculo é outro comando (mostra as chaves).
 
 ## Proteção contra colisão
 
