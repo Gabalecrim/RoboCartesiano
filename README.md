@@ -495,38 +495,57 @@ Atenção: os comandos de setpoint são **maiúsculos** (`S`, `R`, `P`, `A`);
 ## Proteção contra colisão
 
 `lib/colisao` (lógica pura, `pio test -e native -f test_colisao`) vigia o
-**erro de seguimento** durante qualquer movimento:
+encoder durante qualquer movimento, **por janelas de 1 mm**:
 
 ```
-erro = contagens lidas - passos dados x (contagens/mm ÷ passos/mm)
+avanço = contagens lidas na janela / contagens esperadas (passos x contagens/passo)
 ```
 
-Se o conjunto bate, o 28BYJ-48 perde passo: o motor "conta", o carro não
-anda e o erro cresce. Acima de **6 contagens (0,6 mm)** em **2 leituras
-seguidas** (filtra um pico), a bancada:
+Se o conjunto bate, o 28BYJ-48 pula passo: o motor "conta", mas o carro e o
+encoder quase não andam. Com **avanço abaixo de 40%** (ou no sentido contrário)
+em **2 janelas seguidas**, a bancada:
 
 1. para o motor **na hora** e **solta as bobinas** (não fica empurrando o obstáculo);
 2. cancela o programa de setpoints, se estiver rodando;
 3. marca a posição como perdida (precisa de homing);
 4. liga o **ALARME**: LED da placa (GPIO 2) piscando e aviso na serial a cada 5 s.
 
-Com alarme, nenhum comando mexe no motor até reconhecer com **`A`**. Depois,
-`h` refaz a origem. `A` sem alarme mostra o maior erro do último movimento,
-bom para ajustar o limite (`COLISAO_LIMITE_CONT` no `main.cpp`).
+O aviso diz quanto o encoder andou na última janela e o que isso indica:
+encoder **parado** (bateu, ou encoder solto), encoder **ao contrário** (fios A/B
+trocados) ou **bem atrás** (motor perdendo passo: baixe a velocidade).
 
-- Vale para `f`, `b`, `x`, setpoints, homing, `c`, `d` e `g` (as rotinas que
-  bloqueiam vigiam a cada 1 ms).
+Com alarme, nenhum comando mexe no motor até reconhecer com **`A`**. Depois,
+`h` refaz a origem.
+
+| Comando | Faz |
+|---|---|
+| `C` | mostra a proteção e o último movimento (pior avanço, erro total) |
+| `C0` / `C1` | desliga / liga (ao reiniciar a placa volta ligada) |
+
+- **Mudança de 15/11/2026**: antes a proteção olhava o erro **total** desde o
+  início do movimento, com limite de 6 contagens (0,6 mm). Esse erro se
+  acumula (1% de diferença na calibração = 19 contagens em 190 mm, mais as
+  contagens que o encoder perde) e o alarme disparava o tempo todo em
+  movimento longo. A janela olha só o último 1 mm.
+- A 1ª janela de cada movimento é ignorada (folga de inversão do fuso).
+- Perda de passo aos poucos, sem batida, é pega pelo sequenciador: em cada
+  ponto ele compara motor e encoder (`SEQ_TOL_MM`, 1 mm) e cancela.
+- Vale para `f`, `b`, `x`, setpoints, homing, `c`, `d` e `g`.
 - Homing que termina em `TRAVOU` também dá alarme.
-- **Desligada só na varredura `w`**, que força o motor a perder passo.
-- A referência é refeita a cada movimento: folga de inversão não se acumula.
-- A 650 passos/s (padrão), 0,6 mm de atraso = ~154 passos ≈ 0,25 s até parar.
+- Desligada na varredura `w`, que força o motor a perder passo.
+- Detecta em ~2 a 3 mm de motor (~1 s a 650 passos/s). Ajuste em
+  `COLISAO_JANELA_CONT`, `COLISAO_FRACAO_PCT` e `COLISAO_CONFIRMAR` no `main.cpp`.
 
 ✅ **Checkpoint:**
-1. `f5` sem obstáculo: `-- parou (erro de seguimento max 2..3 cont)`, sem alarme.
+1. `x30` e `x220` (curso todo) algumas vezes, sem obstáculo: sem alarme.
+   `C` mostra o pior avanço (normal: 80 a 100%).
 2. `f5` e segure o carro (ou o eixo do motor) com a mão: o motor para e solta,
-   `!!! ALARME: COLISAO`, LED piscando.
+   `!!! ALARME: COLISAO` com "encoder PARADO", LED piscando.
 3. `f`: recusado (`ALARME ativo`). `A`: reconhece, LED apaga. `h`: origem de novo.
 4. `R0` e segure o carro no meio: o programa é cancelado pelo alarme.
+5. Se ainda disparar sem obstáculo: copie a mensagem `!!! na ultima janela ...`.
+   "encoder ao CONTRARIO" = troque A/B; "PARADO" = confira o encoder (`e` e gire
+   à mão); "bem atras" = o motor está perdendo passo (baixe `v` para 550).
 
 ## Diagnóstico: medição de velocidade (`t`)
 

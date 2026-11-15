@@ -391,6 +391,13 @@
           <button data-cmd="e" class="req">Liga / desliga</button>
         </div>
         <p class="dica">Gire o eixo devagar com a mão: A e B aparecem no registro (11 01 00 10 11).</p>
+        <h3>Proteção contra colisão</h3>
+        <div class="linha">
+          <button data-cmd="C" class="req">Ver último movimento</button>
+          <button data-cmd="C0" class="perigo req" data-confirm="Desligar a proteção contra colisão? Batidas NÃO vão parar o motor até religar (ou reiniciar a placa).">Desligar</button>
+          <button data-cmd="C1" class="req">Ligar</button>
+        </div>
+        <p class="dica">"Ver último movimento" mostra o pior avanço do encoder (normal: perto de 100%). Desligue só para testar; ao reiniciar a placa ela volta ligada.</p>
       </div>
 
       <div class="card">

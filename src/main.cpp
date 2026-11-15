@@ -77,15 +77,16 @@
 //   (perdeu passo) e pede homing.
 //
 // Proteção contra colisão (lib/colisao), sempre ligada:
-//   Durante qualquer movimento o encoder tem que acompanhar o motor. Se
-//   ficar mais de COLISAO_LIMITE_CONT contagens para trás (ou à frente)
-//   em COLISAO_CONFIRMAR leituras seguidas, o conjunto bateu: o motor
+//   Durante qualquer movimento, a cada 1 mm (COLISAO_JANELA_CONT) o encoder
+//   tem que andar pelo menos COLISAO_FRACAO_PCT do esperado. Abaixo disso
+//   em COLISAO_CONFIRMAR janelas seguidas, o conjunto bateu: o motor
 //   PARA NA HORA e SOLTA as bobinas (não fica empurrando), o programa é
 //   cancelado, a referência é perdida e o ALARME liga (LED da placa
 //   piscando + aviso na serial). Homing que trava também dá alarme.
 //   Com alarme, nada mexe no motor até reconhecer:
 //   A    -> reconhece o alarme (depois faça o homing: h)
-//   Desligada só na varredura 'w', que força o motor a perder passo.
+//   C    -> mostra a proteção e o último movimento; C0 / C1 desliga / liga
+//   Desligada também na varredura 'w', que força o motor a perder passo.
 //
 // Testes automáticos da rampa (precisam de homing; fazem se faltar):
 //   w, w1400 -> varredura: vaivém entre TESTE_A_MM e TESTE_B_MM subindo a
@@ -162,10 +163,14 @@ static const float DIST_TOLERANCIA_PCT = 10.0f;  // medida mais longe que isso: 
 static const float CURSO_X_MM = 190.0f;
 static const float X_HOME_MM = 30.0f;
 static const float SEQ_TOL_MM = 1.0f;    // motor x encoder em cada ponto
-// Colisão: erro normal medido 2 a 3 contagens; perdendo passo, centenas.
-// 6 contagens = 0,6 mm = ~154 passos: a 650 passos/s detecta em ~0,25 s.
-static const int32_t COLISAO_LIMITE_CONT = 6;
-static const uint8_t COLISAO_CONFIRMAR = 2;      // leituras seguidas (filtra um pico)
+// Colisão (2026-11-15, por janelas; ver lib/colisao): a cada 1 mm o encoder
+// tem que andar pelo menos 40% do esperado. Bateu = encoder quase parado.
+// A 1ª janela de cada movimento é ignorada (folga). Detecta em ~2 a 3 mm
+// (~1 s a 650 passos/s). O limite antigo (erro TOTAL de 6 contagens) dava
+// alarme falso em movimento longo: o erro se acumulava.
+static const int32_t COLISAO_JANELA_CONT = 10;  // contagens = 1 mm
+static const uint8_t COLISAO_FRACAO_PCT = 40;   // avanço mínimo na janela
+static const uint8_t COLISAO_CONFIRMAR = 2;     // janelas ruins seguidas
 static const uint32_t ALARME_REPETE_MS = 5000;   // repete o aviso na serial
 
 // Eixo Z (2026-11-14): malha aberta, sem sensor de homing por enquanto.
@@ -1167,6 +1172,10 @@ static float alarmeX = 0.0f;
 static bool alarmeTinhaReferencia = false;
 static uint32_t alarmeAviso = 0;  // último aviso na serial (ms)
 
+// Diagnóstico da colisão: a janela que disparou (contagens) e a velocidade.
+static int32_t alarmeJanEsp = 0, alarmeJanMed = 0;
+static uint32_t alarmeVel = 0;
+
 static void avisarAlarme() {
   Serial.printf("!!! ALARME: %s", alarmeMotivo);
   if (alarmeErro) {
@@ -1175,6 +1184,18 @@ static void avisarAlarme() {
   }
   if (alarmeTinhaReferencia) Serial.printf(" perto de X %.2f mm", alarmeX);
   Serial.println();
+  if (alarmeJanEsp) {
+    // O que o encoder fez na última janela diz o que provavelmente houve.
+    Serial.printf("!!! na ultima janela o encoder andou %+ld de %+ld contagens esperadas, a %lu passos/s: ",
+                  (long)alarmeJanMed, (long)alarmeJanEsp, (unsigned long)alarmeVel);
+    if ((alarmeJanMed > 0) != (alarmeJanEsp > 0) && alarmeJanMed != 0) {
+      Serial.println("encoder ao CONTRARIO do motor (fios A/B trocados?)");
+    } else if (alarmeJanMed == 0) {
+      Serial.println("encoder PARADO: bateu, motor perdendo passo, ou encoder solto/desligado");
+    } else {
+      Serial.println("encoder bem atras: motor perdendo passo (baixe a velocidade) ou batida");
+    }
+  }
   Serial.println("!!! X parado e solto, Z parado e segurando. Confira o eixo, tire o obstaculo e envie A");
   alarmeAviso = millis();
 }
@@ -1203,12 +1224,38 @@ static void dispararAlarme(const char *motivo, int32_t erro_cont) {
 // Chamar com frequência. true = alarme ativo (quem chamou deve parar).
 static bool vigiarColisao() {
   if (alarme) return true;
+  uint32_t vel = stepper_speed_now(&motX);
   if (!colisao_atualizar(&colisao, stepper_busy(&motX), stepper_moves(&motX),
                          stepper_position(&motX), encoder_count(&encX))) {
     return false;
   }
-  dispararAlarme("COLISAO", colisao_erro(&colisao));
+  alarmeJanEsp = colisao.esperado_j;
+  alarmeJanMed = colisao.medido_j;
+  alarmeVel = vel;
+  dispararAlarme("COLISAO", 0);
   return true;
+}
+
+// C -> mostra;  C0 -> desliga a proteção (testes);  C1 -> liga de novo.
+// Desligada não volta sozinha: o boot sempre liga.
+static void comandoColisao(String resto) {
+  resto.trim();
+  if (resto == "0" || resto == "1") {
+    colisao_habilitar(&colisao, resto == "1");
+    if (resto == "0") {
+      Serial.println("-- protecao contra colisao DESLIGADA: batidas NAO param o motor (C1 liga) --");
+    }
+  } else if (resto.length()) {
+    Serial.printf("comando invalido: 'C%s' (C, C0, C1)\n", resto.c_str());
+    return;
+  }
+  Serial.printf("protecao contra colisao: %s, janela %ld contagens (%.1f mm), avanco minimo %u%%, "
+                "%u janelas seguidas\n",
+                colisao.habilitado ? "ligada" : "DESLIGADA", (long)COLISAO_JANELA_CONT,
+                COLISAO_JANELA_CONT / contagensPorMm, COLISAO_FRACAO_PCT, COLISAO_CONFIRMAR);
+  Serial.printf("   ultimo movimento: pior avanco %ld%%, erro total max %ld contagens (%.2f mm)\n",
+                (long)colisao_pior_pct(&colisao), (long)colisao_erro_max(&colisao),
+                colisao_erro_max(&colisao) / contagensPorMm);
 }
 
 // No loop: pisca o LED (2 Hz) e repete o aviso enquanto o alarme durar.
@@ -1220,12 +1267,12 @@ static void sinalizarAlarme() {
 
 static void reconhecerAlarme() {
   if (!alarme) {
-    Serial.printf("sem alarme (protecao %s, limite %ld contagens, ultimo movimento: erro max %ld)\n",
-                  colisao.habilitado ? "ligada" : "DESLIGADA", (long)COLISAO_LIMITE_CONT,
-                  (long)colisao_erro_max(&colisao));
+    Serial.print("sem alarme. ");
+    comandoColisao("");
     return;
   }
   alarme = false;
+  alarmeJanEsp = alarmeJanMed = 0;
   colisao_rearmar(&colisao);
   digitalWrite(ALARME_LED, LOW);
   Serial.println("-- alarme reconhecido. Faca o homing (h) antes de usar posicoes em mm --");
@@ -1844,7 +1891,7 @@ void setup() {
   Serial.println("           ZK calibracao, ZL solta (cai!)");
   Serial.println("setpoints: S lista, S<x> <z> [mm/s] [ms] acrescenta (ex.: S120 40), S-2 / S- apaga");
   Serial.println("           R / R3 / R0 executa 1x / 3x / sem fim, P pausa/continua, q cancela");
-  Serial.println("colisao: para, solta o motor e liga o ALARME; A reconhece (depois h)");
+  Serial.println("colisao: para, solta o motor e liga o ALARME; A reconhece (depois h); C mostra, C0/C1");
   Serial.println("t, t2 = mede a velocidade com o encoder ligado e parado");
   Serial.println("w = varredura de velocidade (acha o limite), g = grava a curva da rampa (CSV)");
   Serial.printf("encoder: amostra a cada %u us (%u Hz), debounce %u us = %u amostras\n",
@@ -1859,13 +1906,12 @@ void setup() {
   configurarHoming();
   pinMode(ALARME_LED, OUTPUT);
   digitalWrite(ALARME_LED, LOW);
-  ColisaoCfg cc = {COLISAO_LIMITE_CONT, COLISAO_CONFIRMAR};
+  ColisaoCfg cc = {COLISAO_JANELA_CONT, COLISAO_FRACAO_PCT, COLISAO_CONFIRMAR};
   colisao_init(&colisao, &cc, CONTAGENS_MM_NOMINAL / PASSOS_MM_NOMINAL);
   carregarCalibracao();
   colisao_escala(&colisao, contagensPorMm / passosPorMm);
-  Serial.printf("protecao contra colisao: ligada, limite %ld contagens (%.2f mm), %u leituras\n",
-                (long)COLISAO_LIMITE_CONT, COLISAO_LIMITE_CONT / contagensPorMm,
-                COLISAO_CONFIRMAR);
+  Serial.printf("protecao contra colisao: ligada, a cada %.1f mm o encoder anda >= %u%% (C0 desliga)\n",
+                COLISAO_JANELA_CONT / contagensPorMm, COLISAO_FRACAO_PCT);
   mostrarCalibracao();
   carregarPrograma();
   listarPrograma();
@@ -1923,6 +1969,7 @@ static void executar(const String &linha) {
     case 'R': rodarPrograma(resto); return;
     case 'P': pausarOuContinuar(); return;
     case 'A': reconhecerAlarme(); return;
+    case 'C': comandoColisao(resto); return;
     case 'T': comandoTeste(resto); return;
     case 'v': ajustarVelocidade(resto); return;
     case 'a': ajustarAceleracao(resto); return;
@@ -2001,7 +2048,8 @@ void loop() {
   atualizarSequencia();
   if (andando && !stepper_busy(&motX)) {
     andando = false;
-    Serial.printf("-- parou (erro de seguimento max %ld cont) -- ", (long)colisao_erro_max(&colisao));
+    Serial.printf("-- parou (pior avanco %ld%%, erro total max %ld cont) -- ",
+                  (long)colisao_pior_pct(&colisao), (long)colisao_erro_max(&colisao));
     imprimir();
   }
   if (andandoZ && !stepper_busy(&motZ)) {

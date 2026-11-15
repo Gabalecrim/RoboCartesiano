@@ -15,11 +15,11 @@ Registro de onde paramos, para o grupo retomar. Atualizar a cada sessão.
 | 3. Homing + auto calibração | homing 17/17 | **não testado** (falta instalar a chave no GPIO 36) | instalar a chave e fazer o checkpoint do Módulo 3 |
 | 4. Calibração de distância | calib 10/10 | **não testado** | `d100` + `m<medida>` na placa |
 | 5. Setpoints em mm (X e Z) | setpoint 25/25 | **não testado** | checkpoint "Setpoints em mm (X e Z)" do README |
-| 6. Proteção contra colisão (X) | colisao 12/12 | **não testado** | checkpoint "Proteção contra colisão" do README |
+| 6. Proteção contra colisão (X) | colisao 15/15 | **não testado** | checkpoint "Proteção contra colisão" do README |
 | 7. Eixo Z (malha aberta + homing) | (usa setpoint, calib e homing) | **não testado**, motor e chave do Z ainda não ligados | checkpoint "Eixo Z" do README |
 
 O firmware (`pio run -e esp32dev`) compila **sem erros e sem avisos** (`-Wall -Wextra`).
-Os testes do PC (`pio test -e native`) rodam: 115/115 (gcc instalado via WinLibs).
+Os testes do PC (`pio test -e native`) rodam: 118/118 (gcc instalado via WinLibs).
 
 ---
 
@@ -50,6 +50,8 @@ Os testes do PC (`pio test -e native`) rodam: 115/115 (gcc instalado via WinLibs
 - Z andava ao contrário: `Z_DESCE = -1`. Não subia bem a 650 passos/s: padrão 300, partida 150,
   aceleração 600 (comandos novos `ZA` e `ZN`); homing do Z a 250 / 120.
 - Painel com todos os comandos da serial (X manual, rampa, homing/calibração, Z, testes).
+- Colisão por janelas de 1 mm (15/11): o erro total acumulava e o alarme disparava o tempo todo
+  em movimento longo. Comando `C` (mostra), `C0` / `C1` (desliga / liga). Testar na bancada.
 
 ---
 
