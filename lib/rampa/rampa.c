@@ -41,6 +41,8 @@ int8_t IRAM_ATTR rampa_tick(Rampa *r) {
       r->v = (r->v > r->v0 + r->dv) ? r->v - r->dv : r->v0;  // freia
     } else if (r->v < r->vmax) {
       r->v = (r->vmax - r->v > r->dv) ? r->v + r->dv : r->vmax;  // acelera
+    } else if (r->v > r->vmax) {
+      r->v = (r->v - r->vmax > r->dv) ? r->v - r->dv : r->vmax;  // vmax baixou: desacelera
     }
   }
 
@@ -69,6 +71,16 @@ void rampa_parar(Rampa *r) {
 }
 
 void IRAM_ATTR rampa_abortar(Rampa *r) { r->faltam = 0; }
+
+void rampa_mudar_vmax(Rampa *r, uint32_t vmax, uint32_t tick_hz) {
+  uint32_t hz = tick_hz ? tick_hz : 1;
+  if (vmax > hz / 2) vmax = hz / 2;
+  if (vmax == 0) vmax = 1;
+  uint32_t q = paraQ32(vmax, hz);
+  if (q < r->v0) q = r->v0;  // nunca abaixo da partida: a frenagem conta com v0
+  r->vmax = q;
+  if (r->dv == 0) r->v = q;  // sem rampa: muda na hora
+}
 
 uint32_t rampa_velocidade(const Rampa *r, uint32_t tick_hz) {
   if (r->faltam <= 0) return 0;

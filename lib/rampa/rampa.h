@@ -62,6 +62,10 @@ int8_t IRAM_ATTR rampa_tick(Rampa *r);
 bool IRAM_ATTR rampa_ativa(const Rampa *r);
 void rampa_parar(Rampa *r);   // freia pela rampa e para (fora da interrupção)
 void IRAM_ATTR rampa_abortar(Rampa *r);  // para já, sem rampa
+// Muda a velocidade de cruzeiro NO MEIO do movimento (passos/s): acima da
+// atual, acelera até ela; abaixo, desacelera (com 'acel'; sem rampa, na hora).
+// Não desce abaixo de v0. Fora da interrupção, com a trava do motor.
+void rampa_mudar_vmax(Rampa *r, uint32_t vmax, uint32_t tick_hz);
 
 uint32_t rampa_velocidade(const Rampa *r, uint32_t tick_hz);  // passos/s atual
 

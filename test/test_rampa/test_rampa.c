@@ -147,6 +147,79 @@ void test_abortar_para_na_hora(void) {
   for (int i = 0; i < 1000; i++) TEST_ASSERT_EQUAL_INT8(0, rampa_tick(&r));
 }
 
+static uint32_t vel(const Rampa *r) { return (uint32_t)(((uint64_t)r->v * HZ) >> 32); }
+
+// Anda 't' tiques (ou até acabar) e devolve os passos dados.
+static long andar(Rampa *r, uint32_t t) {
+  long n = 0;
+  for (uint32_t i = 0; i < t && rampa_ativa(r); i++) n += rampa_tick(r);
+  return n;
+}
+
+void test_mudar_vmax_para_cima_acelera_ate_ela(void) {
+  Rampa r;
+  RampaCfg c = PADRAO;
+  c.vmax = 400;
+  rampa_iniciar(&r, &c, 100000);
+  andar(&r, HZ);  // 1 s: já em 400
+  TEST_ASSERT_UINT32_WITHIN(2, 400, vel(&r));
+  rampa_mudar_vmax(&r, 900, HZ);
+  andar(&r, HZ / 4);  // 0,25 s a 1000 passos/s²: +250
+  TEST_ASSERT_UINT32_WITHIN(5, 650, vel(&r));
+  andar(&r, HZ);
+  TEST_ASSERT_UINT32_WITHIN(2, 900, vel(&r));
+}
+
+void test_mudar_vmax_para_baixo_desacelera_ate_ela(void) {
+  Rampa r;
+  rampa_iniciar(&r, &PADRAO, 100000);
+  andar(&r, HZ);  // 1000
+  rampa_mudar_vmax(&r, 500, HZ);
+  andar(&r, HZ / 4);  // -250
+  TEST_ASSERT_UINT32_WITHIN(5, 750, vel(&r));
+  andar(&r, HZ);
+  TEST_ASSERT_UINT32_WITHIN(2, 500, vel(&r));
+}
+
+void test_mudar_vmax_nao_muda_os_passos_e_freia_no_fim(void) {
+  Rampa r;
+  rampa_iniciar(&r, &PADRAO, 3000);
+  long n = andar(&r, HZ / 2);
+  rampa_mudar_vmax(&r, 450, HZ);
+  n += andar(&r, HZ / 2);
+  rampa_mudar_vmax(&r, 1000, HZ);
+  uint32_t ultimo = 0;
+  while (rampa_ativa(&r)) {
+    int8_t d = rampa_tick(&r);
+    if (d) ultimo = vel(&r);
+    n += d;
+  }
+  TEST_ASSERT_EQUAL_INT32(3000, n);
+  TEST_ASSERT_UINT32_WITHIN(5, 300, ultimo);  // chegou freando até v0
+}
+
+void test_mudar_vmax_nao_desce_abaixo_de_v0(void) {
+  Rampa r;
+  rampa_iniciar(&r, &PADRAO, 100000);
+  andar(&r, HZ);
+  rampa_mudar_vmax(&r, 50, HZ);  // v0 = 300
+  andar(&r, 2 * HZ);
+  TEST_ASSERT_UINT32_WITHIN(2, 300, vel(&r));
+}
+
+void test_mudar_vmax_sem_rampa_muda_na_hora(void) {
+  Rampa r;
+  RampaCfg c = {.tick_hz = HZ, .v0 = 500, .vmax = 500, .acel = 0};
+  rampa_iniciar(&r, &c, 100000);
+  andar(&r, 100);
+  rampa_mudar_vmax(&r, 200, HZ);  // abaixo de v0: fica em v0 (500)
+  TEST_ASSERT_UINT32_WITHIN(1, 500, vel(&r));
+  c.v0 = 100;
+  rampa_iniciar(&r, &c, 100000);
+  rampa_mudar_vmax(&r, 200, HZ);
+  TEST_ASSERT_UINT32_WITHIN(1, 200, vel(&r));
+}
+
 void test_vmax_limitado_a_meia_frequencia(void) {
   RampaCfg cfg = {.tick_hz = HZ, .v0 = 50000, .vmax = 50000, .acel = 0};
   Perfil p = rodar(&cfg, 2000);
@@ -178,6 +251,11 @@ int main(void) {
   RUN_TEST(test_parar_freia_pela_rampa);
   RUN_TEST(test_parar_sem_rampa_para_na_hora);
   RUN_TEST(test_abortar_para_na_hora);
+  RUN_TEST(test_mudar_vmax_para_cima_acelera_ate_ela);
+  RUN_TEST(test_mudar_vmax_para_baixo_desacelera_ate_ela);
+  RUN_TEST(test_mudar_vmax_nao_muda_os_passos_e_freia_no_fim);
+  RUN_TEST(test_mudar_vmax_nao_desce_abaixo_de_v0);
+  RUN_TEST(test_mudar_vmax_sem_rampa_muda_na_hora);
   RUN_TEST(test_vmax_limitado_a_meia_frequencia);
   RUN_TEST(test_v0_maior_que_vmax_vira_vmax);
   RUN_TEST(test_tiques_total_igual_a_simulacao);
