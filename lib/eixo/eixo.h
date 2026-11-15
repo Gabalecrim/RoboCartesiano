@@ -65,6 +65,9 @@ typedef struct EixoHomingCfg {
   HomingConfig fsm;     // limites da FSM (em passos)
   uint32_t vel_rapida;  // passos/s na busca rápida e no recuo
   uint32_t vel_lenta;   // passos/s na busca lenta (define a precisão)
+  // true: termina com as bobinas LIGADAS (eixo que cai pelo peso, ex.: Z
+  // com fuso de alto avanço). false: solta as bobinas no fim (padrão).
+  bool segurar;
   // Opcional (pode ser NULL): chamada a cada passo; true = parar agora.
   bool (*cancelar)(void *ctx);
   // Opcional (pode ser NULL): avisa mudança de estado e da chave.
@@ -96,7 +99,7 @@ typedef struct EixoCalibResumo {
 
 typedef struct Eixo {
   Stepper *motor;
-  Encoder *enc;
+  Encoder *enc;  // NULL = sem encoder (malha aberta): não vigia travamento
   uint8_t pino_chave;
   bool ativa_em_baixo;  // true: acionada = LOW (pull-up + chave p/ GND)
                         // false: acionada = HIGH (pull-down + chave p/ 3V3)
@@ -110,7 +113,7 @@ bool eixo_chave_crua(const Eixo *e);  // leitura direta do pino (acionada?)
 bool eixo_chave(Eixo *e);             // passa uma amostra pelo debounce (acionada?)
 
 // Homing. Se der certo, zera motor e encoder na chave (origem = 0).
-// Sempre termina com as bobinas soltas. Muda a velocidade do motor:
+// Termina com as bobinas soltas (ou ligadas, se cfg->segurar). Muda a velocidade do motor:
 // quem chamou deve restaurar a sua depois.
 HomingError eixo_home(Eixo *e, const EixoHomingCfg *cfg, EixoHomeResult *out);
 
@@ -120,7 +123,7 @@ HomingError eixo_home(Eixo *e, const EixoHomingCfg *cfg, EixoHomeResult *out);
 bool eixo_andar(Eixo *e, const EixoHomingCfg *cfg, int32_t passos);
 
 // Auto calibração (ver topo). 'aviso' (pode ser NULL) é chamada ao fim
-// de cada ciclo, para imprimir o andamento.
+// de cada ciclo, para imprimir o andamento. Precisa de encoder (enc != NULL).
 HomingError eixo_calibrar(Eixo *e, const EixoHomingCfg *cfg, int32_t passos_ida,
                           uint32_t ciclos,
                           void (*aviso)(const EixoCalibCiclo *c, void *ctx), void *ctx,

@@ -3,6 +3,8 @@
 // Tiques da interrupção dos motores para a chave valer (debounce).
 #define CHAVE_TIQUES ((uint16_t)((uint64_t)EIXO_CHAVE_DEBOUNCE_US * STEPPER_TICK_HZ / 1000000u))
 
+static int32_t contagem(Eixo *e);
+
 // Giro do motor que vai para a chave: +1 (f) ou -1 (b).
 static int8_t paraChave(const EixoHomingCfg *cfg) {
   return cfg->sentido < 0 ? -1 : 1;
@@ -29,9 +31,12 @@ static void avisar(Eixo *e, const EixoHomingCfg *cfg, EixoEventoTipo tipo, Homin
   ev.giro = giroDoEstado(cfg, estado);
   ev.inicio = inicio;
   ev.motor = motor;
-  ev.enc = encoder_count(e->enc);
+  ev.enc = contagem(e);
   cfg->evento(&ev, cfg->ctx);
 }
+
+// Eixo sem encoder (malha aberta, ex.: Z): conta sempre 0.
+static int32_t contagem(Eixo *e) { return e->enc ? encoder_count(e->enc) : 0; }
 
 static bool cancelado(const EixoHomingCfg *cfg) {
   return cfg->cancelar && cfg->cancelar(cfg->ctx);
@@ -62,17 +67,17 @@ typedef enum { ESPERA_FIM, ESPERA_TRAVOU, ESPERA_CANCELADO } Espera;
 
 static Espera esperar(Eixo *e, const EixoHomingCfg *cfg, int32_t janela) {
   int32_t pos_ck = stepper_position(e->motor);
-  int32_t enc_ck = encoder_count(e->enc);
+  int32_t enc_ck = contagem(e);
   while (stepper_busy(e->motor)) {
     if (cancelado(cfg)) {
       stepper_abort(e->motor);
       return ESPERA_CANCELADO;
     }
-    if (janela > 0) {
+    if (janela > 0 && e->enc) {  // sem encoder não dá para ver travamento
       int32_t pos = stepper_position(e->motor);
       int32_t andou = pos > pos_ck ? pos - pos_ck : pos_ck - pos;
       if (andou >= janela) {
-        int32_t enc = encoder_count(e->enc);
+        int32_t enc = contagem(e);
         if (enc == enc_ck) {
           stepper_abort(e->motor);
           return ESPERA_TRAVOU;
@@ -152,11 +157,13 @@ HomingError eixo_home(Eixo *e, const EixoHomingCfg *cfg, EixoHomeResult *out) {
     // Onde a chave acionou, medido na origem ANTERIOR. A origem nova (0)
     // é esse ponto; a interrupção parou o motor nele.
     out->passos_na_chave = na_chave;
-    out->enc_na_chave = encoder_count(e->enc);
+    out->enc_na_chave = contagem(e);
     stepper_reset(e->motor, stepper_position(e->motor) - na_chave);
-    encoder_reset(e->enc, 0);
+    if (e->enc) encoder_reset(e->enc, 0);
   }
-  stepper_release(e->motor);  // parado não precisa de corrente
+  // Parado não precisa de corrente, exceto em eixo que cai pelo peso (Z):
+  // aí as bobinas continuam ligadas (o fim de trecho e o abort as deixam assim).
+  if (!cfg->segurar) stepper_release(e->motor);
   return out->erro;
 }
 
