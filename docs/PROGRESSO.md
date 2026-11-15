@@ -23,6 +23,48 @@ Os testes do PC (`pio test -e native`) rodam: 118/118 (gcc instalado via WinLibs
 
 ---
 
+## O que foi feito em 15/11/2026
+
+### Alarme no homing do X (sempre disparava)
+Dois caminhos davam alarme no homing, e só um deles desligava com `C0`:
+1. **Colisão** (lib/colisao), vigiada a cada 1 ms também durante o homing.
+2. **Travamento do homing** (`janela_trava` = 256 passos sem o encoder mudar): virava
+   "TRAVOU no homing" e **ignorava o `C0`**, por isso não havia como desligar.
+
+Causas prováveis, a conferir na bancada com o `HD`:
+- **Sentido**: se o giro `f` afasta o carro da chave, a busca rápida vai até o batente do outro lado e bate.
+- **Chave não lida**: `HOME_X = 32` no pins.h, mas a documentação antiga cita o GPIO 36. Fio no
+  pino errado = a chave nunca aciona = o carro bate no fim do curso. Agora há pull-down
+  interno também (a entrada não fica no ar).
+- **Partida a 500 passos/s sem rampa** (o homing não usa rampa; o resto parte de 300): o 28BYJ-48
+  pode não arrancar. Testar com `HV400` / `HV300`.
+- **Folga de inversão** maior que 1 mm no recuo: o encoder não mexe no começo e o travamento dispara. `HT512`.
+- **Encoder ao contrário** (A/B trocados): a colisão dispara em qualquer movimento longo.
+
+**Resultado na bancada (15/11):** com a proteção desligada o homing terminou normal; o alarme
+era **"TRAVOU no homing"** = falso positivo (chave, sentido e motor ok). Correção em
+`lib/eixo/eixo.c`: o travamento ignora a 1ª janela de cada trecho (folga de inversão), como a
+colisão já fazia. **A testar** com a proteção ligada (`C1` + `h`); se ainda travar, `HT512`.
+
+**Depois (15/11):** continua dando alarme nos movimentos manuais e a faixa não aparecia no
+painel. O painel foi testado no Edge (headless) com as linhas do firmware e a faixa funciona;
+então a linha `!!! ALARME` não chegava ou a placa REINICIAVA (o boot apaga a faixa).
+- O estado do alarme agora vai na linha de estado (`... ALARME: <motivo>`) e no `C`
+  (`alarme: ATIVO (...)` / `alarme: nenhum`); o painel segue isso, com chip "alarme" no topo.
+- No boot sai `reinicio: <motivo>` (BROWNOUT, PANIC, WATCHDOG...); o painel mostra faixa amarela
+  se a placa reiniciar sozinha. **Pendente:** ver qual é (alarme de colisão ou reinício) e, se
+  for colisão, a linha `!!! na ultima janela ...` diz se o encoder está ao contrário (`HD` confirma).
+
+Mudanças:
+- `C0` desliga também o travamento do homing (`C1` religa).
+- No alarme do homing, a serial diz a fase, os passos do motor e as contagens do encoder nessa fase, a chave e a **causa provável**.
+- "homing FALHOU (cancelado)" virou "parado pelo ALARME de colisão" quando foi o alarme.
+- Comandos novos: `H` mostra, `HV`/`HL` velocidades, `HT` janela de travamento, `HS+1`/`HS-1`
+  sentido, `HD` diagnóstico (anda 2 mm para a chave e confere o encoder e a chave). Valem até reiniciar.
+- Painel: faixa de alarme com todos os detalhes e botão "Reconhecer e desligar a proteção";
+  quadro "Diagnóstico do homing X" na aba Operar (chave, teste de sentido/encoder, ajustes,
+  homing sem proteção); chip "proteção" no topo; o jog segue o sentido do homing.
+
 ## O que foi feito em 14/11/2026
 
 ### Eixo Z em malha aberta
@@ -30,21 +72,173 @@ Os testes do PC (`pio test -e native`) rodam: 118/118 (gcc instalado via WinLibs
   o Gab trocou o IN1 de 23 para 14). O 14 dá pulsos no boot: no máximo um tranco no Z.
 - **Homing do Z** (`ZH`): chave NA **embaixo** (Z = 80 mm na chave; o zero continua no topo), GPIO 4 (escolha do Gab), pull-down externo de 10 kΩ.
   Usa `lib/homing` + `lib/eixo` sem encoder (`enc = NULL`, sem janela de travamento) e
-  termina segurando (`EixoHomingCfg.segurar`). o `R` faz o `ZH` antes, se faltar.
+  termina solto (`EixoHomingCfg.segurar = Z_SEGURAR`). o `R` faz o `ZH` antes, se faltar.
   `Z_TEM_CHAVE = false` volta para a referência manual (`ZR`).
 - Fuso igus de alto avanço, 8 entradas x ~3 mm = 24 mm/volta (85,33 passos/mm),
   **a confirmar** com `ZD50` + `ZM<medida>`. Curso 80 mm, Z = 0 no topo.
-- Bobinas do Z **sempre ligadas** (fuso de alto avanço não trava). Alarme do X e `l`
-  param o Z sem soltar. `ZL` solta (o Z cai e perde a referência).
+- Bobinas do Z **soltas ao parar** (2026-11-15, `Z_SEGURAR = false`): sempre ligadas o
+  motor superaquecia, e a caixa de redução do 28BYJ-48 já segura o Z. Fim de movimento,
+  homing, `q`, `l`, alarme e cancelamento soltam o Z. `ZL` solta sem perder a referência.
+  `Z_SEGURAR = true` volta ao comportamento antigo (segurar com corrente).
 - Referência manual (`ZR` no topo) continua valendo; sem proteção contra colisão no Z.
 - Setpoints agora têm X e Z (`S<x> <z> [mm/s] [ms]`); o sequenciador anda um eixo por
   vez (Z sobe primeiro / X anda primeiro quando o Z desce). Programa do formato antigo é apagado.
 - O homing do X (`h`) não mexe no Z (2026-11-15: a chave do X fica embaixo, o braço não precisa subir).
 - Painel (`tools/painel.html`): campo Z, coluna Z, quadro do Z (homing, sobe/desce, zerar, ir).
 
+### X pela posição do encoder (2026-11-15)
+- `lib/malha` (pura, `test_malha`): o alvo do X é em **contagens do encoder**; os passos
+  saem do erro medido. Parado (+30 ms para o encoder assentar), `|erro| > 1 contagem`
+  (0,1 mm) vira correção, até 4. Não chegou → aviso `[malha X] NAO CHEGOU` e o programa cancela.
+- Vale para `x`, setpoints e programa. `f`/`b`, homing e calibrações continuam em passos.
+- Passo perdido não tira mais a referência (antes: `SEQ_TOL_MM` cancelava e pedia homing).
+- Estado na serial: `X: <encoder> mm (motor <passos> mm)`; o painel lê esse formato.
+- Corrige só parado: o KY-040 tem 25,6 passos por contagem e debounce de 1 ms; corrigir em
+  movimento brigaria com a rampa.
+- **Limites dos motores** (X e Z): 500 passos/s e 1000 passos/s² (`VEL_LIMITE`, `ACEL_LIMITE`).
+  X padrão = os limites; Z padrão continua 300 passos/s e 600 passos/s². A varredura `w`
+  passa do limite de propósito.
+
+### Homing geral e teste dos eixos (2026-11-15)
+- Painel mostrava "sem homing" depois do homing: o firmware passou a imprimir
+  `X: … mm (motor … mm)` e o painel antigo procurava `(encoder …)`. O painel aceita os dois.
+  Recarregue a página (Ctrl+F5) depois de atualizar o `painel.html`.
+- `HA`: homing de todos os eixos (Z desce até a chave, depois o X). Mesma ordem do `R`.
+- `E`: homing do que faltar, Z sobe ao topo, teste do X e teste do Z. `EX` / `EZ`: só um.
+  - X: 4 pontos pelo encoder (60, 200, 125, 40 mm) com erro e correções em cada um; depois
+    refaz o homing: a chave tem que acionar a ±2 contagens (±0,2 mm) da origem.
+  - Z: 4 pontos (0, 60, 20, 70 mm) e refaz o homing: a chave tem que acionar a ±0,5 mm de
+    onde deveria (sem encoder, é assim que aparece passo perdido). Termina no topo.
+  - Resumo: `== teste ...: OK / FALHOU / CANCELADO ==`. Painel: aba Operar (botões) e aba
+    Testes (lista ponto a ponto).
+
+### Travou: baixa a rotação em vez de alarme (2026-11-15)
+- O **alarme de colisão saiu** (alarmava demais em falso). O comando `A`, o LED piscando e a
+  faixa vermelha do painel não existem mais.
+- A detecção continua a mesma (`lib/colisao`, janelas de 1 mm). Travou (encoder parado com o
+  motor girando) → o X para, multiplica velocidade, partida e aceleração por 60% (mínimos
+  120 passos/s, 60 passos/s, 200 passos/s²) e **continua o resto do movimento**. A malha do
+  encoder corrige no fim o que o motor contou sem andar. O perfil normal volta quando o X para.
+- Até 5 travadas no mesmo movimento; na 6ª desiste: para, solta e cancela o programa. A
+  referência **continua valendo** (a posição vem do encoder).
+- Homing que trava: refaz mais devagar (rápida e lenta x 60%), até 3 tentativas; as
+  velocidades do `H` voltam no fim.
+- Serial: linhas `[trava X] ...`. Painel: chip "travadas" (amarelo = baixou a rotação,
+  vermelho = desistiu). `C` mostra o total de travadas desde o boot; `C0`/`C1` continuam.
+
+### Governo da velocidade + movimento ao vivo (2026-11-15)
+- Começou a travar mais com a versão anterior (perfil reduzido a cada travada, só voltava no
+  fim do movimento). Agora: `lib/governo` (pura, `test_governo`) mantém um **limite** de
+  velocidade do X:
+  - travou → limite = 60% da velocidade em que travou (mínimo 120 passos/s); o motor para,
+    ressincroniza e continua o que faltava já no limite (a partida também fica nele);
+  - andando sem travar 300 ms → sobe 25 passos/s a cada 250 ms até 500 (metade do ritmo
+    acima de onde travou da última vez). **Ao vivo**, no meio do movimento.
+  - O limite vale entre movimentos; parado não sobe.
+- `lib/rampa`: `rampa_mudar_vmax` (acelera/desacelera até a nova vmax no meio do movimento);
+  `lib/stepper`: `stepper_set_limit` (limite por cima do perfil) e `stepper_remaining`.
+- Desiste com 9 travadas no mesmo movimento. Homing que trava refaz no limite novo (3x).
+- Telemetria `@T` a cada 100 ms andando (também nas rotinas que bloqueiam). Painel: quadro
+  "Movimento ao vivo" (aba Operar) com X encoder/motor, Z, velocidades, limite e as travadas
+  marcadas, últimos 30 s. As linhas `@T` não vão para o registro.
+- `C` mostra o governo (limite, última travada, total). A varredura `w` desliga o governo.
+
+### Setpoint de velocidade pelo encoder (2026-11-15, substitui a subida por tempo acima)
+- `lib/governo` reescrita: **setpoint** = velocidade pedida (`v` passos/s, `V` mm/s novo, ou a do
+  ponto do programa). A cada 50 ms compara encoder x motor numa janela de ≥ 0,5 s (e ≥ 5
+  contagens esperadas; em rotação baixa a janela cresce até 2 s):
+  - encoder < 75% do motor (perdendo passo) → **rotação cai ao vivo** para o menor entre 70%
+    da do motor e a velocidade real (mínimo 120 passos/s);
+  - **a cada 1 s** sem queda tenta recuperar: sobe metade do que falta até o setpoint
+    (≥ 25 passos/s); chegou → `[vel X] setpoint recuperado`.
+  - Encoder parado de vez (`lib/colisao`) continua: ressincroniza e segue com menos rotação.
+- Serial: `[vel X] CAIU ...`, `[vel X] tentando recuperar ...`, `[vel X] setpoint recuperado`.
+- `@T` ganhou 2 campos no fim: velocidade real pelo encoder e setpoint (passos/s).
+- Painel (Movimento ao vivo): setpoint, X real (encoder), rotação do motor e permitida; campo
+  para o setpoint em mm/s (`V`); gráfico com setpoint (tracejado), motor, real e as quedas.
+
+### Nada para o sistema por interpretação do encoder (2026-11-15)
+- Decisão do Gab: detecção de travamento/queda **só baixa a rotação e avisa**. Removido:
+  - parar e reiniciar o movimento quando trava (agora baixa a rotação ao vivo, sem parar);
+  - desistir depois de N travadas (`TRAVA_MAX`) e cancelar o programa;
+  - cancelar o homing quando o encoder para (o homing termina pela chave ou pelo curso);
+  - cancelar o programa quando a malha não chega na tolerância (vira `[seq] aviso`).
+- Janela de travamento do homing (`HT`) vem **desligada** (0). `HT256` liga só para diagnóstico.
+- Continuam parando só: `q`, `l`, Esc/PARAR do painel, chave de homing e curso máximo do homing.
+
+### Controle de rotação configurável (2026-11-15)
+- Depois de **subir**, a rotação fica pelo menos 1 s sem mudar (`GS`, mínimo 1000 ms):
+  quedas e travadas nesse tempo não reduzem, mas seguram a próxima subida.
+- **Quedas para reduzir** (`GQ`, padrão 2): janelas seguidas (sem sobreposição) com o encoder
+  < 75% do motor antes de baixar; uma janela boa zera a conta. Travada também conta.
+- **Fator de aceleração** (`GA`, padrão 50%): % do que falta até o setpoint subido a cada 1 s.
+- **Fator de desaceleração** (`GD`, padrão 70%): % da rotação mantida na queda.
+- `G` mostra, `G0` volta aos padrões. Salvos na placa (Preferences "gov").
+- Painel (Movimento ao vivo → Controle de rotação): os 4 campos, Aplicar, Ler e Padrões.
+- Serial nova: `[vel X] queda 1/2 ... ainda nao reduz`, `[trava X] ... mantendo a rotacao`.
+
+### Posição do X só pelo encoder (2026-11-15)
+- Os passos do motor **não** são mais referência de posição do X em lugar nenhum:
+  - linha de estado: `encoder X: <cont> cont (erros N)   X: <mm> mm` (ou `X: sem homing`);
+  - `@T`: o 3º campo agora é a contagem crua do encoder (era o X pelo motor);
+  - `[seq] chegou: X <mm> mm (encoder <cont> cont)`; teste do X sem "motor";
+  - novo `x+10` / `x-1`: anda/volta em mm pelo encoder, vale sem homing (com homing,
+    respeita o curso). O jog do painel usa isso (antes era f/b em voltas do motor);
+  - testes de diagnóstico (`w`, `g`): o ponto de partida vem do encoder (`alvoMm` conta a
+    partir da leitura do encoder);
+  - `t` (encoder desligado na volta) não copia mais a posição do motor para o encoder:
+    perde a referência e pede homing.
+- Continuam em passos só o que mede o próprio motor: `f`/`b`, calibração de passos/mm
+  (`d`, `c`), e a comparação motor x encoder do governo e da detecção de travamento.
+- Z continua em passos (não tem encoder).
+- Painel: chip "encoder X" com a leitura crua; "Movimento ao vivo" mostra "Encoder X
+  (leitura)" em contagens; o gráfico de posição não tem mais a linha do motor.
+
+### Posição atual e alvo sempre visíveis (2026-11-15)
+- `@T` sai **sempre**: andando 10/s, parado 4/s (antes só andando: parado ou mexido à mão,
+  a posição não atualizava). Campos novos no fim: alvo X (mm e contagens), estado da malha
+  (`m` indo, `c` chegou, `f` fora da tolerância, `-` sem alvo) e alvo do Z.
+- Linha de estado: `alvo X: 125.00 mm (chegou)` (sem homing, em contagens).
+- Painel (Movimento ao vivo): quadros grandes "Posição atual do X (encoder)", "Alvo do X",
+  "Falta (alvo − atual)" e "Z atual / alvo"; chip "alvo X" no topo; alvos tracejados no
+  gráfico de posição.
+
+### Painel: posição que não atualizava (2026-11-15)
+- Sem homing o painel escrevia só "sem homing" (e escondia a linha do X no gráfico): agora
+  mostra sempre o X em mm pelo encoder, marcado "(sem homing)"/"relativo" (zero ao ligar).
+- Linha de estado depois de `-- parou ... --` não era lida (regex com `^`): corrigido.
+- Erro ao tratar uma linha encerrava a leitura da serial inteira: agora cada linha tem
+  try/catch e o erro vai para o registro.
+- Chip "dados da placa": "chegando" (verde) quando as linhas `@T` chegam; "nenhum (grave o
+  firmware novo)" ou "PAROU de chegar" (vermelho) quando não.
+
+### Encoder do X sem sinal + Z com 40 mm (2026-11-15)
+- Log da bancada: homing X com o motor andando 19628 passos (~77 mm) e `encoder X: 0 cont
+  (erros 0)` o tempo todo → o encoder (GPIO 34/35) **não está mandando nenhuma transição**.
+  Firmware do encoder não mudou: é cabo, 3V3 ou acoplamento. Diagnóstico: `e` e girar o fuso.
+- Com o encoder parado em 0, a malha achava que o carro nunca saía do lugar: cada `x220`
+  mandava o curso inteiro de novo (e o governo baixava a rotação sem motivo).
+- Novo: **encoder sem sinal** = o motor andou 5 mm (`ENC_SEM_SINAL_MM`) e o encoder não mudou
+  nenhuma contagem (fato medido). Não para nada; só impede usar a posição falsa: sem correção
+  da malha, sem governo, sem detecção de travamento, recusa movimento novo pelo encoder e tira
+  a referência. Volta sozinho quando o encoder contar (`[encoder X] voltou a contar`).
+- `@T` ganhou o último campo `ok`/`SEMSINAL`; linha de estado mostra `SEM SINAL`. Painel: chip
+  "encoder X" vermelho e aviso embaixo da posição atual.
+- Painel: "Framing error" (bytes do boot da placa ao abrir a porta) não encerra mais a leitura.
+- **Curso do Z = 40 mm** (`CURSO_Z_MM`; a chave do homing é o fundo, Z = 40). Teste do Z vai a
+  0, 30, 10, 35 mm. Programa salvo com Z > 40 é apagado ao ligar (validação).
+- Chave X oscilando (`[sensor] homing X APERTADO/solto` dezenas de vezes) com o Z andando: o
+  carro fica parado exatamente no ponto em que a chave aciona (fim do homing) e a vibração do Z
+  faz ela bater; ou interferência do cabo do Z no GPIO 32. A conferir.
+
 ### A decidir / medir
+- Ajustar `GOV_QUEDA_PCT` (75%) na bancada: o KY-040 tem ±10% de resolução na janela de 0,5 s
+  a 500 passos/s. Queda falsa sem travar → baixe para 65%.
+- Ver nas linhas `[trava X]` em que velocidade o X trava sem carga: se for sempre perto de
+  500 passos/s, baixar `VEL_LIMITE` resolve na origem.
+- Testar a malha na bancada: `x100`, `x50`... e ver as linhas `[malha X] correcao`.
 - Velocidade máxima real do Z (650 passos/s assumido, igual ao X).
-- Se o Z desce sozinho sem corrente com a garra montada (decide `Z_SEGURAR`).
+- Confirmar com a garra montada que o Z não desce sem corrente (se descer: `Z_SEGURAR = true`).
 - Saídas livres para o Y e a garra: 13, 16, 17, 23 (faltam 5); o 39 está livre só como entrada.
 - Testador de motor no painel: `TX` / `TZ` escolhe o motor de 1..4, p, o; `T0` termina.
 - Z andava ao contrário: `Z_DESCE = -1`. Não subia bem a 650 passos/s: padrão 300, partida 150,
