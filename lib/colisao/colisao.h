@@ -20,8 +20,8 @@
 //   contagens num curso de 190 mm, e o encoder perdendo algumas contagens
 //   também soma. Isso dava alarme falso em movimento longo. A janela olha
 //   só o último trecho: tolera desvio lento e pega o encoder parado.
-//   Perda de passo aos poucos (sem bater) quem pega é o sequenciador, que
-//   compara motor x encoder em cada ponto (SEQ_TOL_MM no main.cpp).
+//   Perda de passo aos poucos (sem bater) quem resolve é a posição pelo
+//   encoder (lib/malha): parado, o erro no encoder vira correção.
 //
 // A referência é refeita a cada movimento novo (stepper_moves muda) e com
 // o motor parado: um zero (homing) entre movimentos não vira colisão.

@@ -47,7 +47,7 @@ constexpr uint8_t MOT_Z_IN4 = 27;
 //
 // X: fim do curso do lado 'f' (lado em homingX.sentido, main.cpp).
 constexpr uint8_t HOME_X = 32;
-// Z: EMBAIXO, no fundo do curso (Z = 80 mm). O GPIO 4 é entrada E saída: gasta uma das
+// Z: EMBAIXO, no fundo do curso (Z = 40 mm). O GPIO 4 é entrada E saída: gasta uma das
 // saídas do Y/garra (o 39, só entrada, está livre). É de strapping, mas com o
 // pull-down a placa liga normal.
 constexpr uint8_t HOME_Z = 4;

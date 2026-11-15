@@ -43,18 +43,18 @@
 //   CURSO_X_MM (190 mm) a partir da chave -> X vai de 30 a 220 mm.
 //
 // Eixo Z (malha aberta: sem encoder; chave de homing EMBAIXO, GPIO HOME_Z):
-//   Z = descida a partir do topo: 0 = topo (seguro), CURSO_Z_MM (80) = embaixo.
+//   Z = descida a partir do topo: 0 = topo (seguro), CURSO_Z_MM (40) = embaixo (deslocamento máximo do Z, 2026-11-15).
 //   Fuso igus de alto avanço, 8 entradas x ~3 mm = 24 mm/volta (85,33 passos/mm).
-//   Esse fuso NÃO trava sozinho: as bobinas do Z ficam SEMPRE ligadas (o motor
-//   esquenta; sem corrente o Z desce pelo peso).
+//   As bobinas do Z são SOLTAS ao parar (Z_SEGURAR = false): ligadas o tempo
+//   todo o motor superaquecia, e a caixa de redução do 28BYJ-48 já segura o Z.
 //   ZH        -> homing do Z: DESCE até a chave, sobe 2 mm, volta devagar;
-//                Z = 80 (fundo) na chave e continua segurando. O 'R' faz o ZH
+//                Z = 40 (fundo) na chave e solta as bobinas. O 'R' faz o ZH
 //                antes, se faltar. O homing do X ('h') NÃO mexe no Z.
 //                Confira que não há nada embaixo do braço antes.
 //   Z+5 / Z-5 -> desce / sobe 5 mm (vale sem referência)
 //   ZR        -> "aqui é o topo": Z = 0 (referência manual, sem a chave)
 //   Z40       -> vai para Z = 40 mm (precisa de ZH ou ZR);  Z -> mostra
-//   ZV300     -> velocidade do Z (passos/s, padrão Z_VEL_PADRAO);  ZL -> solta (o Z CAI!)
+//   ZV300     -> velocidade do Z (passos/s, padrão Z_VEL_PADRAO);  ZL -> solta as bobinas
 //   ZA600 / ZN150 -> aceleração / partida do Z (mais devagar = mais torque)
 //   ZD, ZD50  -> calibração: desce 1 mm (folga), espera 5 s para marcar e
 //                desce 50 mm;  ZM49.6 -> medida real;  ZK / ZK0 -> mostra / nominal
@@ -73,19 +73,54 @@
 //   P    -> pausa / continua;   q -> cancela (freando);  l -> cancela e solta o X
 //   Um eixo por vez: se o ponto pede subir, o Z sobe primeiro e depois o X
 //   anda; se pede descer, o X anda primeiro e o Z desce por último.
-//   Em cada ponto confere o encoder do X: diferença > SEQ_TOL_MM cancela
-//   (perdeu passo) e pede homing.
+//   O X vai pela posição do ENCODER (lib/malha): parado, o erro no encoder
+//   vira correção (até MALHA_CORRECOES); não chegou = programa cancelado.
 //
-// Proteção contra colisão (lib/colisao), sempre ligada:
+// Posição do X pelo encoder (2026-11-15):
+//   x, setpoints e programa usam o encoder como referência. O alvo em mm
+//   vira contagens; os passos saem do erro medido. Depois de parar (e de
+//   MALHA_ASSENTAR_MS), se |erro| > MALHA_TOL_CONT (0,1 mm) corrige.
+//   Passo perdido não tira mais a referência: o encoder sabe onde o carro está.
+//   f / b continuam em passos (diagnóstico). O Z continua em malha aberta.
+//   Limites dos dois motores: VEL_LIMITE (500 passos/s), ACEL_LIMITE (1000 passos/s²).
+//
+// Travamento do X (lib/colisao detecta; SEM alarme desde 2026-11-15):
 //   Durante qualquer movimento, a cada 1 mm (COLISAO_JANELA_CONT) o encoder
 //   tem que andar pelo menos COLISAO_FRACAO_PCT do esperado. Abaixo disso
-//   em COLISAO_CONFIRMAR janelas seguidas, o conjunto bateu: o motor
-//   PARA NA HORA e SOLTA as bobinas (não fica empurrando), o programa é
-//   cancelado, a referência é perdida e o ALARME liga (LED da placa
-//   piscando + aviso na serial). Homing que trava também dá alarme.
-//   Com alarme, nada mexe no motor até reconhecer:
-//   A    -> reconhece o alarme (depois faça o homing: h)
-//   C    -> mostra a proteção e o último movimento; C0 / C1 desliga / liga
+//   em COLISAO_CONFIRMAR janelas seguidas, o X TRAVOU (motor para,
+//   ressincroniza e continua o que faltava, já com menos rotação).
+//
+// Setpoint de velocidade do X pelo encoder (lib/governo, 2026-11-15):
+//   SETPOINT = velocidade pedida (v em passos/s, V em mm/s, ou a do ponto do
+//   programa). A cada GOV_AMOSTRA_MS mede a velocidade REAL do carro pelo
+//   encoder (janela de ~GOV_JANELA_MS) e compara com a do motor:
+//     - real < GOV_QUEDA_PCT da do motor (perdendo passo) = 1 queda; com
+//       N quedas SEGUIDAS (GQ) a rotação cai, ao vivo, para o menor entre o
+//       fator de desaceleração (GD %) da do motor e a real (mais torque),
+//       sem descer de GOV_VEL_MIN;
+//     - a cada GOV_INTERVALO_MS (1 s) sem queda, tenta recuperar: sobe o
+//       fator de aceleração (GA %) do que falta até o setpoint;
+//     - depois de SUBIR, mantém a rotação pelo menos GS ms (>= 1000): quedas
+//       nesse tempo não reduzem (mas seguram a próxima subida).
+//   G    -> mostra;  GQ2 quedas para reduzir;  GA50 fator de aceleração (%);
+//           GD70 fator de desaceleração (%);  GS1000 mantém depois de subir (ms).
+//           Ficam salvos na placa.
+//   V    -> mostra o setpoint, a velocidade real e a rotação;  V1.8 -> setpoint em mm/s
+//   NADA PARA O SISTEMA por interpretação do encoder (2026-11-15): queda e
+//   travada só baixam a rotação ao vivo; a malha do encoder corrige a
+//   posição no fim e, se não chegar, só avisa. Homing: HT vem desligado.
+//   Telemetria: sempre (andando 10/s, parado 4/s) sai uma linha "@T" (painel desenha):
+//     @T <ms> <X mm pelo encoder> <encoder contagens> <vx passos/s> <vx mm/s> <limite>
+//        <Z mm> <vz passos/s> <vz mm/s> <ref X><ref Z> <real passos/s> <setpoint passos/s>
+//        <alvo X mm> <alvo X cont> <m/c/f = movendo/chegou/fora> <alvo Z mm>  ("-" = sem alvo)
+//        <ok / SEMSINAL = encoder do X sem sinal>
+//   C    -> mostra a detecção e o governo; C0 / C1 desliga / liga
+//          (C0 desliga também o travamento do homing, para diagnosticar)
+//
+// Ajustes do homing X (valem até reiniciar; para ficar, configurarHoming()):
+//   H mostra;  HV500 busca rápida;  HL150 busca lenta (passos/s);
+//   HT256 janela de travamento em passos (0 = desliga);  HS+1 / HS-1 sentido;
+//   HD diagnóstico: anda 2 mm para a chave e confere encoder e chave.
 //   Desligada também na varredura 'w', que força o motor a perder passo.
 //
 // Testes automáticos da rampa (precisam de homing; fazem se faltar):
@@ -127,6 +162,8 @@
 #include "colisao.h"
 #include "eixo.h"
 #include "encoder.h"
+#include "governo.h"
+#include "malha.h"
 #include "setpoint.h"
 #include "stepper.h"
 
@@ -134,11 +171,14 @@ static const int32_t PASSOS_POR_VOLTA = 2048;  // 28BYJ-48, passo completo
 // Perfil inicial da rampa (ajuste na bancada com v, a, n).
 // Medido com 'w' (2026-11-10, a1500): 650 passos/s ok, 700 perde passo, e a
 // aceleração (1000 a 2500) não mudou o limite.
-static const uint32_t VEL_LIMITE = 650;  // passos/s (~19 RPM, ~2,5 mm/s): teto de tudo
-// Padrão = sempre a máxima (decisão do Gab, 2026-11-12). Sem margem: se
-// perder passo, a proteção contra colisão para e dá alarme.
+// Limites dos DOIS motores (decisão do Gab, 2026-11-15): 500 passos/s e
+// 1000 passos/s². v, a, ZV, ZA, HV, HL e os setpoints não passam disso.
+// (A varredura 'w' passa de propósito: ela procura onde o motor perde passo.)
+static const uint32_t VEL_LIMITE = 500;   // passos/s (~14,6 RPM, ~1,95 mm/s no X)
+static const uint32_t ACEL_LIMITE = 1000; // passos/s²
+// Padrão = sempre a máxima (decisão do Gab, 2026-11-12).
 static const uint32_t VEL_MAX_PADRAO = VEL_LIMITE;
-static const uint32_t ACEL_PADRAO = 1500;     // passos/s²
+static const uint32_t ACEL_PADRAO = ACEL_LIMITE;  // passos/s²
 static const uint32_t VEL_PARTIDA_PADRAO = 300;  // passos/s
 static const float VOLTAS_MAX = 20.0f;
 
@@ -162,23 +202,47 @@ static const float DIST_TOLERANCIA_PCT = 10.0f;  // medida mais longe que isso: 
 // na chave, o centro do braço está a 30 mm dela. X = centro do braço.
 static const float CURSO_X_MM = 190.0f;
 static const float X_HOME_MM = 30.0f;
-static const float SEQ_TOL_MM = 1.0f;    // motor x encoder em cada ponto
-// Colisão (2026-11-15, por janelas; ver lib/colisao): a cada 1 mm o encoder
-// tem que andar pelo menos 40% do esperado. Bateu = encoder quase parado.
-// A 1ª janela de cada movimento é ignorada (folga). Detecta em ~2 a 3 mm
-// (~1 s a 650 passos/s). O limite antigo (erro TOTAL de 6 contagens) dava
-// alarme falso em movimento longo: o erro se acumulava.
+// Posição do X pelo encoder (2026-11-15, lib/malha): o alvo é em contagens;
+// depois de cada movimento, parado, o erro no encoder vira correção.
+// 1 contagem = 0,1 mm (KY-040: 80 contagens/volta, fuso de 8 mm).
+static const int32_t MALHA_TOL_CONT = 1;      // chegou: |erro| <= 0,1 mm
+static const uint8_t MALHA_CORRECOES = 4;     // correções antes de desistir
+static const uint32_t MALHA_ASSENTAR_MS = 30; // espera o encoder assentar (debounce 1 ms)
+// Detecção de travamento (2026-11-15, por janelas; ver lib/colisao): a cada
+// 1 mm o encoder tem que andar pelo menos 40% do esperado. Travou = encoder
+// quase parado. A 1ª janela de cada movimento é ignorada (folga).
 static const int32_t COLISAO_JANELA_CONT = 10;  // contagens = 1 mm
 static const uint8_t COLISAO_FRACAO_PCT = 40;   // avanço mínimo na janela
 static const uint8_t COLISAO_CONFIRMAR = 2;     // janelas ruins seguidas
-static const uint32_t ALARME_REPETE_MS = 5000;   // repete o aviso na serial
+// Setpoint de velocidade do X pelo encoder (lib/governo). A 500 passos/s o
+// encoder dá ~20 contagens/s: a janela de 0,5 s tem ~10 (±10% de resolução).
+static const uint32_t GOV_AMOSTRA_MS = 50;    // amostra motor x encoder
+static const uint32_t GOV_JANELA_MS = 500;    // janela mínima de medição
+static const int32_t GOV_MIN_CONT = 5;        // contagens esperadas para avaliar
+static const uint8_t GOV_QUEDA_PCT = 75;      // real abaixo disso da do motor = caiu
+static const uint32_t GOV_VEL_MIN = 120;      // passos/s
+static const uint32_t GOV_INTERVALO_MS = 1000;  // tenta recuperar o setpoint a cada 1 s
+static const uint32_t GOV_SUBIDA_MIN = 25;    // passos/s mínimos por tentativa
+// Configuráveis (G, painel), salvos na placa. Padrões:
+static const uint8_t GOV_QUEDAS_PADRAO = 2;     // quedas seguidas para reduzir
+static const uint8_t GOV_SUBIDA_PCT_PADRAO = 50;   // fator de aceleração (% do que falta)
+static const uint8_t GOV_REDUZIR_PCT_PADRAO = 70;  // fator de desaceleração (% mantido)
+static const uint32_t GOV_SEGURAR_MS_MIN = 1000;   // depois de subir, mantém pelo menos 1 s
+static uint8_t govQuedas = GOV_QUEDAS_PADRAO;
+static uint8_t govSubidaPct = GOV_SUBIDA_PCT_PADRAO;
+static uint8_t govReduzirPct = GOV_REDUZIR_PCT_PADRAO;
+static uint32_t govSegurarMs = GOV_SEGURAR_MS_MIN;
+static const uint8_t HOM_TENTATIVAS = 3;      // homing que trava: refaz no limite novo
+static const uint32_t TELEM_MS = 100;         // telemetria "@T" andando (10 por segundo)
+static const uint32_t TELEM_PARADO_MS = 250;  // parado (4 por segundo): posição sempre atualizada
+static const float ENC_SEM_SINAL_MM = 5.0f;  // motor andou isso sem o encoder mudar = encoder sem sinal
 
 // Eixo Z (2026-11-14): malha aberta, sem sensor de homing por enquanto.
 // Fuso igus de alto avanço: 8 entradas, ~3 mm entre roscas, Ø ~6 mm.
 // Avanço = entradas x passo = 8 x 3 = 24 mm por volta. Conferir com ZD.
 static const float Z_AVANCO_MM = 24.0f;
 static const float Z_PASSOS_MM_NOMINAL = PASSOS_POR_VOLTA / Z_AVANCO_MM;  // 85,33
-static const float CURSO_Z_MM = 80.0f;
+static const float CURSO_Z_MM = 40.0f;  // deslocamento máximo do Z (era 80; decisão do Gab, 2026-11-15)
 // Giro do motor que DESCE o Z: +1 = sentido do 'f'. Na bancada (2026-11-14) o Z
 // andou ao contrário com +1: ficou -1. Se Z+5 subir, troque o sinal.
 static const int8_t Z_DESCE = -1;
@@ -186,12 +250,17 @@ static const int8_t Z_DESCE = -1;
 // 28BYJ-48 tem mais torque devagar, então o padrão é Z_VEL_PADRAO.
 // Nada disso foi medido no Z (sem encoder não há varredura automática):
 // ajuste com ZV, ZA e ZN e confira com ciclos e régua.
-static const uint32_t Z_VEL_LIMITE = 650;
+static const uint32_t Z_VEL_LIMITE = VEL_LIMITE;  // 500 passos/s
 static const uint32_t Z_VEL_PADRAO = 300;  // passos/s (~3,5 mm/s): padrão do Z
-static const uint32_t Z_ACEL = 600;       // passos/s² (rampa suave: menos tranco)
+static const uint32_t Z_ACEL = 600;       // passos/s² (rampa suave; teto ACEL_LIMITE)
 static const uint32_t Z_PARTIDA = 150;    // passos/s: partida lenta = mais torque
-// Fuso de alto avanço não trava: sem corrente o Z desce pelo peso.
-static const bool Z_SEGURAR = true;
+// false (2026-11-15): com as bobinas sempre ligadas o motor do Z superaquecia.
+// A caixa de redução do 28BYJ-48 já segura o Z parado, então as bobinas são
+// soltas ao fim de todo movimento. true = volta a segurar com corrente.
+static const bool Z_SEGURAR = false;
+
+// Para o Z na hora: solto (padrão) ou segurando, conforme Z_SEGURAR.
+static void zPararNaHora();
 static const float Z_DIST_PADRAO = 50.0f;  // calibração ZD
 static const float Z_DIST_PRE_MM = 1.0f;   // desce antes de marcar: assenta a folga
 // Homing do Z (2026-11-14): chave EMBAIXO (HOME_Z), no fundo do curso.
@@ -234,11 +303,40 @@ static int32_t pendPassos = 0;
 static int32_t pendContagens = 0;
 static float pendMm = 0.0f;
 
-// ---------- proteção contra colisão (definida mais abaixo) ----------
+// ---------- travamento do X (definido mais abaixo) ----------
 static ColisaoMonitor colisao;
-static bool alarme = false;  // travado até o 'A'
+static Gov govX;  // limite de velocidade do X (lib/governo)
 static bool vigiarColisao();
-static void dispararAlarme(const char *motivo, int32_t erro_cont);
+static void governarX();
+static void telemetria();
+// Alvo do Z (passos) para o painel: quem manda o Z andar não guarda; com o Z
+// andando, é a posição + o que falta. Fica o último até um novo movimento.
+static int32_t zAlvoPassos = 0;
+static bool zTemAlvo = false;
+// Encoder do X sem sinal: o motor andou ENC_SEM_SINAL_MM e o encoder não
+// mudou NENHUMA contagem (fato medido, não interpretação). Não para nada: só
+// impede usar uma posição falsa (sem correção da malha, sem reduzir rotação,
+// sem movimento novo pelo encoder). Volta sozinho quando o encoder contar.
+static bool encSemSinal = false;
+static bool homTravou = false;     // o encoder parou durante o homing do X
+
+// ---------- diagnóstico do homing do X ----------
+// Onde o homing do X estava: diz em que fase travou (e que travada é do
+// homing, não de um movimento comum). Preenchido por avisoHoming (eixo "X").
+struct HomingCtx {
+  bool ativo;          // homing do X em andamento (ou acabou de falhar)
+  HomingState fase;    // última fase em que o motor andava
+  int8_t giro;         // giro nessa fase: +1 = f, -1 = b
+  int32_t motor0;      // motor no início da fase
+  int32_t enc0;        // encoder no início da fase
+};
+static HomingCtx homCtx = {false, HOM_PARADO, 0, 0, 0};
+// Janela de travamento do homing (passos sem o encoder mudar = travou e o
+// homing PARA). 0 = desligado (padrão desde 2026-11-15: não para por
+// interpretação do encoder; o homing termina pela chave ou pelo curso).
+// HT256 liga de novo, só para diagnóstico.
+static int32_t homTravaPassos = 0;
+static void aplicarTravaHoming();
 
 // Coordenada X em mm (centro do braço), com a calibração atual.
 static EixoMm eixoMm() {
@@ -246,13 +344,74 @@ static EixoMm eixoMm() {
 }
 static float vmaxMm() { return VEL_LIMITE / passosPorMm; }  // mm/s
 
-// X do centro do braço pelo motor e pelo encoder (os dois zeram na chave).
-static float posicaoMm() {
-  EixoMm e = eixoMm();
-  return eixo_passos_para_mm(&e, stepper_position(&motX));
-}
+// X do centro do braço: SÓ pelo encoder (zera na chave do homing).
 static float encoderMm() {
   return X_HOME_MM + (float)(-homingX.sentido * encoder_count(&encX)) / contagensPorMm;
+}
+
+// ---------- eixo X: posição pelo encoder (lib/malha) ----------
+static Malha malhaX;
+static uint32_t xParadoDesde = 0;  // millis() da última vez que o motor estava andando
+
+// mm (centro do braço) -> contagens do encoder (inverso de encoderMm).
+static int32_t mmParaContagens(float mm) {
+  return (int32_t)lroundf(-homingX.sentido * (mm - X_HOME_MM) * contagensPorMm);
+}
+// contagens do encoder -> mm (centro do braço); o mesmo que encoderMm() para um valor qualquer.
+static float contagensParaMm(int32_t c) { return X_HOME_MM + (float)(-homingX.sentido * c) / contagensPorMm; }
+
+static void xEscala() {
+  malha_escala(&malhaX, passosPorMm / contagensPorMm);
+  gov_escala(&govX, contagensPorMm / passosPorMm);
+}
+
+// X ocupado: motor andando ou a malha ainda corrigindo.
+static bool xOcupado() { return stepper_busy(&motX) || malha_ativa(&malhaX); }
+
+// Manda o X para 'alvo' contagens do encoder (sem bloquear). false = já estava
+// lá, ou o encoder está sem sinal (andar por uma posição falsa jogaria o carro
+// no fim do curso: o erro nunca diminui).
+static bool xIrContagens(int32_t alvo) {
+  if (encSemSinal) {
+    Serial.println("[encoder X] SEM SINAL: movimento pelo encoder nao feito (a posicao lida e falsa)."
+                   " Confira cabo, 3V3 e acoplamento; teste: e + girar o fuso a mao");
+    return false;
+  }
+  int32_t passos = malha_ir(&malhaX, alvo, encoder_count(&encX));
+  if (passos == 0) return false;
+  stepper_start(&motX, passos, true);  // solta as bobinas ao chegar (TR8x8 trava)
+  xParadoDesde = millis();
+  return true;
+}
+
+static bool xIr(float mm) { return xIrContagens(mmParaContagens(mm)); }
+
+// Chamada a cada volta do loop(): com o motor parado e o encoder assentado,
+// mede o erro e corrige (ou termina).
+static void xAtualizarMalha() {
+  if (!malha_ativa(&malhaX)) return;
+  if (encSemSinal) {  // sem encoder não há erro para corrigir: termina o movimento como está
+    malha_cancelar(&malhaX);
+    return;
+  }
+  if (stepper_busy(&motX)) {
+    xParadoDesde = millis();
+    return;
+  }
+  if (millis() - xParadoDesde < MALHA_ASSENTAR_MS) return;
+  int32_t passos = malha_parou(&malhaX, encoder_count(&encX));
+  if (passos != 0) {
+    Serial.printf("[malha X] correcao %u: erro %+ld cont (%+.2f mm) -> %+ld passos\n",
+                  malha_correcoes(&malhaX), (long)malha_erro(&malhaX),
+                  -homingX.sentido * malha_erro(&malhaX) / contagensPorMm, (long)passos);
+    stepper_start(&motX, passos, true);
+    xParadoDesde = millis();
+  } else if (malha_estado(&malhaX) == MALHA_FALHOU) {
+    Serial.printf("[malha X] aviso: ficou a %+ld cont (%+.2f mm) do alvo depois de %u correcoes"
+                  " (so aviso: nada parou)\n",
+                  (long)malha_erro(&malhaX), -homingX.sentido * malha_erro(&malhaX) / contagensPorMm,
+                  malha_correcoes(&malhaX));
+  }
 }
 
 // ---------- eixo Z: coordenada (malha aberta) ----------
@@ -277,6 +436,14 @@ static ProgLimites limites() {
   return l;
 }
 
+static void zPararNaHora() {
+  if (Z_SEGURAR) {
+    stepper_abort(&motZ);  // para e continua com corrente
+  } else {
+    stepper_release(&motZ);  // para e solta: a caixa de redução segura
+  }
+}
+
 // Move o Z sem bloquear (as bobinas continuam ligadas no fim se Z_SEGURAR).
 static void zIniciar(int32_t alvo) {
   if (alvo == stepper_position(&motZ)) return;
@@ -287,6 +454,8 @@ static void zIniciar(int32_t alvo) {
 // Também é chamada a cada 1 ms pelas rotinas que bloqueiam (homing, d, c,
 // testes): por isso vigia a colisão aqui.
 static bool cancelarPelaSerial(void *) {
+  governarX();   // também nas esperas bloqueantes (homing, testes, calibrações)
+  telemetria();
   if (vigiarColisao()) return true;
   while (Serial.available()) {
     int c = Serial.read();
@@ -302,6 +471,18 @@ static const char *giroNome(int8_t g) { return g > 0 ? "f" : (g < 0 ? "b" : "-")
 static void avisoHoming(const EixoEvento *ev, void *ctx) {
   const char *eixo = ctx ? (const char *)ctx : "X";
   bool temEnc = eixo[0] == 'X';
+  if (temEnc) {
+    if (ev->tipo == EIXO_EV_ESTADO) {
+      if (ev->inicio) homCtx.ativo = true;
+      if (ev->giro != 0) {  // fase em que o motor anda: guarda o ponto de partida
+        homCtx.fase = ev->estado;
+        homCtx.giro = ev->giro;
+        homCtx.motor0 = ev->motor;
+        homCtx.enc0 = ev->enc;
+      }
+      if (ev->estado == HOM_OK) homCtx.ativo = false;
+    }
+  }
   if (ev->tipo == EIXO_EV_CHAVE) {
     Serial.printf("[homing %s] SENSOR %s  (motor %ld", eixo, ev->chave ? "APERTADO" : "solto",
                   (long)ev->motor);
@@ -335,7 +516,7 @@ static void configurarHomingZ() {
   homingZ.fsm.janela_trava = 0;  // sem encoder
   homingZ.vel_rapida = Z_HOME_VEL_RAPIDA;
   homingZ.vel_lenta = Z_HOME_VEL_LENTA;
-  homingZ.segurar = Z_SEGURAR;  // o fuso não trava: termina segurando
+  homingZ.segurar = Z_SEGURAR;  // false: termina solto (a caixa de redução segura)
   homingZ.cancelar = cancelarPelaSerial;
   homingZ.evento = avisoHoming;
   homingZ.ctx = (void *)"Z";
@@ -346,7 +527,7 @@ static void configurarHoming() {
   homingX.fsm.curso_max = 30 * PASSOS_POR_VOLTA;  // maior que o curso do eixo
   homingX.fsm.recuo = PASSOS_POR_VOLTA / 4;       // 1/4 de volta além de soltar
   homingX.fsm.recuo_max = 4 * PASSOS_POR_VOLTA;   // a chave tem que soltar antes disso
-  homingX.fsm.janela_trava = 256;                 // ~10 contagens esperadas sem mudar = travou
+  homingX.fsm.janela_trava = homTravaPassos;      // 0 = não para por encoder (HT liga)
   homingX.vel_rapida = 500;                       // passos/s
   homingX.vel_lenta = 150;                        // passos/s: define a precisão da origem
   homingX.cancelar = cancelarPelaSerial;
@@ -356,9 +537,24 @@ static void configurarHoming() {
 }
 
 static void imprimir() {
-  Serial.printf("motor: %6ld   encoder: %5ld   erros: %lu", (long)stepper_position(&motX),
-                (long)encoder_count(&encX), (unsigned long)encoder_errors(&encX));
-  if (referenciado) Serial.printf("   X: %.2f mm (encoder %.2f mm)", posicaoMm(), encoderMm());
+  // A posição do X é SÓ a do encoder (os passos do motor não entram).
+  Serial.printf("encoder X: %ld cont (erros %lu)%s", (long)encoder_count(&encX),
+                (unsigned long)encoder_errors(&encX), encSemSinal ? " SEM SINAL" : "");
+  if (referenciado) {
+    Serial.printf("   X: %.2f mm", encoderMm());
+  } else {
+    Serial.print("   X: sem homing");
+  }
+  // Alvo do X (pelo encoder). Sem homing só em contagens: em mm não teria origem.
+  if (malha_estado(&malhaX) != MALHA_PARADA) {
+    int32_t a = malha_alvo(&malhaX);
+    const char *est = malha_estado_nome(malha_estado(&malhaX));
+    if (referenciado) {
+      Serial.printf("   alvo X: %.2f mm (%s)", contagensParaMm(a), est);
+    } else {
+      Serial.printf("   alvo X: %ld cont (%s)", (long)a, est);
+    }
+  }
   if (zReferenciado) {
     Serial.printf("   Z: %.2f mm", zMm());
   } else {
@@ -506,6 +702,10 @@ static bool lerInteiro(String resto, bool zero_ok, uint32_t *out) {
 static void ajustarVelocidade(String resto) {
   uint32_t v;
   if (lerInteiro(resto, false, &v)) {
+    if (v > VEL_LIMITE) {
+      Serial.printf("acima do limite (%lu passos/s): ficou no limite\n", (unsigned long)VEL_LIMITE);
+      v = VEL_LIMITE;
+    }
     velocidade = v;
     stepper_set_speed(&motX, velocidade);
   }
@@ -515,6 +715,10 @@ static void ajustarVelocidade(String resto) {
 static void ajustarAceleracao(String resto) {
   uint32_t a;
   if (lerInteiro(resto, true, &a)) {
+    if (a > ACEL_LIMITE) {
+      Serial.printf("acima do limite (%lu passos/s2): ficou no limite\n", (unsigned long)ACEL_LIMITE);
+      a = ACEL_LIMITE;
+    }
     StepperPerfil p;
     stepper_get_profile(&motX, &p);
     p.acel = a;
@@ -526,6 +730,7 @@ static void ajustarAceleracao(String resto) {
 static void ajustarPartida(String resto) {
   uint32_t v0;
   if (lerInteiro(resto, false, &v0)) {
+    if (v0 > VEL_LIMITE) v0 = VEL_LIMITE;
     StepperPerfil p;
     stepper_get_profile(&motX, &p);
     p.v0 = v0;
@@ -536,7 +741,7 @@ static void ajustarPartida(String resto) {
 
 // Movimento sem bloqueio em andamento? Avisa e devolve true.
 static bool ocupado() {
-  if (!stepper_busy(&motX)) return false;
+  if (!xOcupado()) return false;
   Serial.printf("motor andando (%lu passos/s): q para parar, l para soltar\n",
                 (unsigned long)stepper_speed_now(&motX));
   return true;
@@ -548,12 +753,26 @@ static bool andando = false;
 static void imprimirHome(const EixoHomeResult &r) {
   if (r.erro == HOM_ERRO_NENHUM) {
     Serial.printf("homing ok em %lu passos\n", (unsigned long)r.passos_dados);
+  } else if (r.erro == HOM_ERRO_CANCELADO && homTravou) {
+    // Quem parou foi a detecção de travamento (encoder parado), já mais devagar.
+    Serial.printf("homing FALHOU (travou: encoder parado) na fase '%s', depois de %lu passos\n",
+                  homing_state_nome(homCtx.fase), (unsigned long)r.passos_dados);
+    Serial.println("   confira o eixo (ponto duro? acoplamento? encoder solto?) ou baixe HV/HL");
   } else {
-    Serial.printf("homing FALHOU (%s) no estado '%s', depois de %lu passos\n",
-                  homing_error_nome(r.erro), homing_state_nome(r.parou_em),
+    Serial.printf("homing FALHOU (%s) na fase '%s', depois de %lu passos\n",
+                  homing_error_nome(r.erro),
+                  homing_state_nome(r.parou_em == HOM_ERRO ? homCtx.fase : r.parou_em),
                   (unsigned long)r.passos_dados);
-    // Travou (encoder parado com o motor girando) = bateu em algo.
-    if (r.erro == HOM_ERRO_TRAVOU) dispararAlarme("TRAVOU no homing", 0);
+    if (r.erro == HOM_ERRO_CURSO) {
+      Serial.printf("   andou o curso todo sem a chave acionar: confira a chave (s), o pino "
+                    "(HOME_X = GPIO %u) e o sentido (HD testa)\n", HOME_X);
+    } else if (r.erro == HOM_ERRO_CHAVE_PRESA) {
+      Serial.println("   a chave nao soltou: chave NF no lugar de NA, fio em curto com o 3V3 "
+                     "ou chave travada (s mostra o pino)");
+    }
+    if (r.erro == HOM_ERRO_TRAVOU) {
+      Serial.println("   travou (encoder parado com o motor girando) mesmo devagar: confira o eixo");
+    }
   }
 }
 
@@ -561,7 +780,7 @@ static void imprimirHome(const EixoHomeResult &r) {
 static bool zEsperarParar() {
   while (stepper_busy(&motZ)) {
     if (cancelarPelaSerial(nullptr)) {
-      stepper_abort(&motZ);
+      zPararNaHora();
       return false;
     }
     delay(1);
@@ -576,10 +795,16 @@ static int32_t zPassosNaChave() {
 }
 
 // Homing do Z (ZH, e pelo 'h' e pelo 'R' quando o Z não tem referência).
-// A chave fica EMBAIXO: desce até ela e termina ali, segurando, com
-// Z = Z_HOME_MM (80 mm, o fundo). A coordenada não muda: 0 continua no topo.
+// A chave fica EMBAIXO: desce até ela e termina ali (solto se !Z_SEGURAR), com
+// Z = Z_HOME_MM (40 mm, o fundo). A coordenada não muda: 0 continua no topo.
 // true = deu certo.
+// Último homing do Z, para os testes (E): passos entre onde a chave estava e
+// onde deveria estar (~0 = não perdeu passo). Só vale com referência antes.
+static int32_t zUltimaDif = 0;
+static bool zUltimaDifValida = false;
+
 static bool fazerHomingZ() {
+  zUltimaDifValida = false;
   if (!Z_TEM_CHAVE) {
     Serial.println("Z sem chave de homing (Z_TEM_CHAVE = false): leve ao topo e envie ZR");
     return false;
@@ -591,6 +816,7 @@ static bool fazerHomingZ() {
   eixo_home(&eixoZ, &homingZ, &r);
   sincronizarChaveZ();
   zReferenciado = (r.erro == HOM_ERRO_NENHUM);
+  zTemAlvo = false;  // a coordenada do Z mudou: o alvo antigo não vale
   andandoZ = false;
   if (zReferenciado) {
     // O eixo_home zerou o motor na chave; a chave é o fundo, não o zero.
@@ -600,14 +826,16 @@ static bool fazerHomingZ() {
                   (unsigned long)r.passos_dados, r.passos_dados / zPassosPorMm, Z_HOME_MM);
     // Com referência antes: onde a chave estava x onde deveria estar.
     // ~0 = o Z não perdeu passo desde o último homing.
+    zUltimaDifValida = tinhaRef;
     if (tinhaRef) {
       int32_t dif = r.passos_na_chave - naChave;
+      zUltimaDif = dif;
       Serial.printf("   chave a %ld passos (%.2f mm) de onde estava antes\n", (long)dif,
                     dif / zPassosPorMm);
     }
   } else {
     Serial.printf("homing do Z FALHOU (%s) no estado '%s', depois de %lu passos. "
-                  "Z parado e segurando, SEM referencia\n",
+                  "Z parado, SEM referencia\n",
                   homing_error_nome(r.erro), homing_state_nome(r.parou_em),
                   (unsigned long)r.passos_dados);
     if (r.erro == HOM_ERRO_CURSO) {
@@ -619,10 +847,34 @@ static bool fazerHomingZ() {
 
 // Homing do X: só o X anda. O Z fica onde está (decisão do Gab, 2026-11-15:
 // a chave do X fica embaixo e o braço não precisa subir para o X andar).
+// Último homing do X, para os testes (E): onde a chave acionou na origem
+// anterior. Com referência antes, ~0 = a origem repetiu.
+static EixoHomeResult xUltimoHome = {};
+static bool xUltimoTinhaRef = false;
+
 static void fazerHoming() {
+  malha_cancelar(&malhaX);
   Serial.println("-- homing (Enter com qualquer tecla cancela) --");
-  EixoHomeResult r;
-  eixo_home(&eixoX, &homingX, &r);
+  xUltimoTinhaRef = referenciado;
+  EixoHomeResult &r = xUltimoHome;
+  // Travou (encoder parado): refaz o homing. A travada já baixou o limite do
+  // governo (mais torque); as buscas andam no menor entre HV/HL e o limite.
+  for (uint8_t tentativa = 1;; tentativa++) {
+    homTravou = false;
+    eixo_home(&eixoX, &homingX, &r);
+    // Travamento do próprio homing (HT): o governo também precisa saber.
+    if (r.erro == HOM_ERRO_TRAVOU) {
+      gov_travou(&govX, 0);
+      stepper_set_limit(&motX, gov_limite(&govX));
+    }
+    bool travou = r.erro == HOM_ERRO_TRAVOU || (r.erro == HOM_ERRO_CANCELADO && homTravou);
+    if (!travou || tentativa >= HOM_TENTATIVAS) break;
+    Serial.printf("[trava X] homing travou na fase '%s' (tentativa %u/%u): refazendo no limite de"
+                  " %lu passos/s\n",
+                  homing_state_nome(homCtx.fase), tentativa, HOM_TENTATIVAS,
+                  (unsigned long)gov_limite(&govX));
+  }
+  homCtx.ativo = false;  // acabou: travada daqui em diante não é do homing
   sincronizarChave();
   referenciado = (r.erro == HOM_ERRO_NENHUM);
   imprimirHome(r);
@@ -713,6 +965,7 @@ static void salvarCalibracao() {
   prefs.putFloat("x_cpmm", contagensPorMm);
   prefs.end();
   colisao_escala(&colisao, contagensPorMm / passosPorMm);
+  xEscala();
 }
 
 static void mostrarCalibracao() {
@@ -834,12 +1087,43 @@ static void comandoCalibracao(String resto) {
   mostrarCalibracao();
 }
 
+// x120 -> vai para X = 120 mm;  x+10 / x-1 -> anda 10 mm / volta 1 mm.
+// Tudo pelo ENCODER. O relativo vale sem homing (conta a partir da leitura
+// atual do encoder); com homing, não passa do curso.
 static void irPara(String resto) {
-  if (!referenciado) {
-    Serial.println("sem referencia: faca o homing primeiro (h ou d)");
+  resto.trim();
+  if (resto.length() > 0 && (resto[0] == '+' || resto[0] == '-')) {
+    float d = lerMm(resto.substring(1));
+    if (!(d > 0.0f) || d > CURSO_X_MM) {
+      Serial.printf("deslocamento invalido: '%s' (use x+mm ou x-mm, ate %.0f)\n", resto.c_str(),
+                    CURSO_X_MM);
+      return;
+    }
+    if (resto[0] == '-') d = -d;
+    if (referenciado) {
+      EixoMm e = eixoMm();
+      float alvo = encoderMm() + d;
+      if (!eixo_mm_dentro(&e, alvo)) {
+        Serial.printf("fora do curso: X iria para %.2f mm (%.0f a %.0f)\n", alvo, eixo_mm_min(&e),
+                      eixo_mm_max(&e));
+        return;
+      }
+    }
+    int32_t alvoCont = encoder_count(&encX) + (int32_t)lroundf(-homingX.sentido * d * contagensPorMm);
+    if (xIrContagens(alvoCont)) {
+      andando = true;
+      Serial.printf("X %s %.2f mm pelo encoder (alvo %ld cont; q para parar)%s\n",
+                    d > 0 ? "anda" : "volta", fabsf(d), (long)alvoCont,
+                    referenciado ? "" : " (sem homing: sem limite de curso!)");
+      return;
+    }
+    imprimir();
     return;
   }
-  resto.trim();
+  if (!referenciado) {
+    Serial.println("sem referencia: faca o homing primeiro (h ou d); x+mm / x-mm valem sem homing");
+    return;
+  }
   if (resto.length() > 0) {
     float mm = lerMm(resto);
     EixoMm e = eixoMm();
@@ -848,11 +1132,9 @@ static void irPara(String resto) {
                     eixo_mm_min(&e), eixo_mm_max(&e));
       return;
     }
-    int32_t alvo = eixo_mm_para_passos(&e, mm);
-    if (alvo != stepper_position(&motX)) {
-      stepper_start_to(&motX, alvo, true);  // volta na hora; solta ao chegar
+    if (xIr(mm)) {  // pelo encoder; volta na hora e solta ao chegar
       andando = true;
-      Serial.printf("indo para X = %.2f mm (q para parar)\n", mm);
+      Serial.printf("indo para X = %.2f mm pelo encoder (q para parar)\n", mm);
       return;
     }
   }
@@ -1018,6 +1300,7 @@ static void comandoSetpoint(String resto) {
 // Executa a ação que o sequenciador pediu: um eixo por fase.
 static void executarAcao(SeqAcao a) {
   if (a == SEQ_FREAR) {
+    malha_cancelar(&malhaX);  // senão, parado, ela corrigiria de volta ao alvo
     stepper_stop(&motX);
     stepper_stop(&motZ);
     return;
@@ -1030,12 +1313,9 @@ static void executarAcao(SeqAcao a) {
   }
   // Fase sem deslocamento: não liga o motor (o sequenciador vê parado = feita).
   if (seq_eixo(&seq) == SEQ_EIXO_X) {
-    EixoMm e = eixoMm();
-    int32_t alvo = eixo_mm_para_passos(&e, sp->x_mm);
-    if (alvo == stepper_position(&motX)) return;
-    Serial.printf("[seq]   X -> %.2f mm\n", sp->x_mm);
+    // Sempre chama xIr: mesmo sem mover, ela registra o resultado (CHEGOU).
     stepper_set_speed(&motX, velocidadeDoPonto(sp, passosPorMm, velocidade, VEL_LIMITE));
-    stepper_start_to(&motX, alvo, true);  // X: solta as bobinas ao chegar (TR8x8 trava)
+    if (xIr(sp->x_mm)) Serial.printf("[seq]   X -> %.2f mm\n", sp->x_mm);
   } else {
     EixoMm e = eixoZmm();
     int32_t alvo = eixo_mm_para_passos(&e, sp->z_mm);
@@ -1057,23 +1337,19 @@ static void fimDoPrograma(const char *como) {
 // Chamada a cada volta do loop().
 static void atualizarSequencia() {
   if (!seq_ativo(&seq)) return;
-  bool ocupado = stepper_busy(&motX) || stepper_busy(&motZ);
+  bool ocupado = xOcupado() || stepper_busy(&motZ);
 
   if (seq_estado(&seq) == SEQ_MOVENDO && !ocupado && seq.fase == 1) {
-    // Chegou no ponto: o encoder confirma que o carro do X está mesmo lá.
-    float x = posicaoMm();
-    float xe = encoderMm();
-    Serial.printf("[seq] chegou: X %.2f mm (encoder %.2f mm) Z %.2f mm", x, xe, zMm());
+    // Chegou no ponto. O X foi pelo encoder: passo perdido já foi corrigido.
+    // Se a malha não chegou na tolerância, só AVISA: o programa continua.
+    Serial.printf("[seq] chegou: X %.2f mm (encoder %ld cont) Z %.2f mm", encoderMm(),
+                  (long)encoder_count(&encX), zMm());
     const Setpoint *sp = seq_alvo(&seq);
     if (sp->espera_ms) Serial.printf(", espera %lu ms", (unsigned long)sp->espera_ms);
     Serial.println();
-    if (fabsf(xe - x) > SEQ_TOL_MM) {
-      seq_cancelar(&seq);
-      referenciado = false;
-      Serial.printf("PERDEU PASSO: encoder %.2f mm longe do motor (limite %.1f mm). Faca o homing (h)\n",
-                    xe - x, SEQ_TOL_MM);
-      fimDoPrograma("cancelado");
-      return;
+    if (malha_estado(&malhaX) == MALHA_FALHOU) {
+      Serial.printf("[seq] aviso: X ficou a %.2f mm do ponto pelo encoder (continua)\n",
+                    -homingX.sentido * malha_erro(&malhaX) / contagensPorMm);
     }
   }
 
@@ -1082,7 +1358,7 @@ static void atualizarSequencia() {
   SeqEstado agora = seq_estado(&seq);
   if (agora == antes) return;
   if (agora == SEQ_PAUSADO) {
-    Serial.printf("[seq] pausado em X %.2f mm Z %.2f mm: P continua, q cancela\n", posicaoMm(),
+    Serial.printf("[seq] pausado em X %.2f mm Z %.2f mm: P continua, q cancela\n", encoderMm(),
                   zMm());
   } else if (agora == SEQ_FIM) {
     char txt[40];
@@ -1164,118 +1440,715 @@ static bool cancelarPrograma() {
   return true;
 }
 
-// ---------- proteção contra colisão: alarme ----------
+// ---------- X: setpoint de velocidade pelo encoder (sem alarme) ----------
+// (2026-11-15) O governo mede a velocidade real pelo encoder; caiu -> menos
+// rotação (ao vivo: stepper_set_limit muda a rampa no meio do movimento);
+// a cada 1 s sem queda tenta voltar ao setpoint. Travou de vez (encoder
+// parado) -> o motor ressincroniza e continua com menos rotação.
+// O limite vale entre movimentos: o próximo começa nele e continua tentando.
 
-static const char *alarmeMotivo = "";
-static int32_t alarmeErro = 0;
-static float alarmeX = 0.0f;
-static bool alarmeTinhaReferencia = false;
-static uint32_t alarmeAviso = 0;  // último aviso na serial (ms)
+static uint32_t govUltimoMs = 0;  // última atualização do governo
+static uint32_t govAplicado = 0;  // limite já mandado ao motor
+static bool govSuspenso = false;  // varredura w: sem limite
 
-// Diagnóstico da colisão: a janela que disparou (contagens) e a velocidade.
-static int32_t alarmeJanEsp = 0, alarmeJanMed = 0;
-static uint32_t alarmeVel = 0;
+static void govAplicar() {
+  if (govSuspenso) return;
+  uint32_t l = gov_limite(&govX);
+  if (l == govAplicado) return;
+  stepper_set_limit(&motX, l);
+  govAplicado = l;
+}
 
-static void avisarAlarme() {
-  Serial.printf("!!! ALARME: %s", alarmeMotivo);
-  if (alarmeErro) {
-    Serial.printf(" (encoder %+ld contagens = %+.2f mm do esperado)", (long)alarmeErro,
-                  alarmeErro / contagensPorMm);
-  }
-  if (alarmeTinhaReferencia) Serial.printf(" perto de X %.2f mm", alarmeX);
-  Serial.println();
-  if (alarmeJanEsp) {
-    // O que o encoder fez na última janela diz o que provavelmente houve.
-    Serial.printf("!!! na ultima janela o encoder andou %+ld de %+ld contagens esperadas, a %lu passos/s: ",
-                  (long)alarmeJanMed, (long)alarmeJanEsp, (unsigned long)alarmeVel);
-    if ((alarmeJanMed > 0) != (alarmeJanEsp > 0) && alarmeJanMed != 0) {
-      Serial.println("encoder ao CONTRARIO do motor (fios A/B trocados?)");
-    } else if (alarmeJanMed == 0) {
-      Serial.println("encoder PARADO: bateu, motor perdendo passo, ou encoder solto/desligado");
-    } else {
-      Serial.println("encoder bem atras: motor perdendo passo (baixe a velocidade) ou batida");
+// Setpoint em mm/s (o governo trabalha em passos/s do motor).
+static float spMmS() { return gov_setpoint_atual(&govX) / passosPorMm; }
+static float realMmS() { return gov_vel_real(&govX) / passosPorMm; }
+
+// Configuração do governo: fixos + os ajustáveis pelo G (painel).
+static GovCfg govMontarCfg() {
+  GovCfg c = {VEL_LIMITE,    GOV_VEL_MIN,  GOV_QUEDA_PCT,    govReduzirPct,
+              GOV_JANELA_MS, GOV_MIN_CONT, GOV_INTERVALO_MS, GOV_SUBIDA_MIN,
+              govQuedas,     govSubidaPct, govSegurarMs};
+  return c;
+}
+
+static void govCarregar() {
+  prefs.begin("gov", true);
+  govQuedas = prefs.getUChar("quedas", GOV_QUEDAS_PADRAO);
+  govSubidaPct = prefs.getUChar("subida", GOV_SUBIDA_PCT_PADRAO);
+  govReduzirPct = prefs.getUChar("reduzir", GOV_REDUZIR_PCT_PADRAO);
+  govSegurarMs = prefs.getULong("segurar", GOV_SEGURAR_MS_MIN);
+  prefs.end();
+  // Valores salvos estranhos voltam ao padrão.
+  if (govQuedas < 1 || govQuedas > 20) govQuedas = GOV_QUEDAS_PADRAO;
+  if (govSubidaPct < 5 || govSubidaPct > 100) govSubidaPct = GOV_SUBIDA_PCT_PADRAO;
+  if (govReduzirPct < 10 || govReduzirPct > 95) govReduzirPct = GOV_REDUZIR_PCT_PADRAO;
+  if (govSegurarMs < GOV_SEGURAR_MS_MIN || govSegurarMs > 30000) govSegurarMs = GOV_SEGURAR_MS_MIN;
+}
+
+static void govSalvar() {
+  prefs.begin("gov", false);
+  prefs.putUChar("quedas", govQuedas);
+  prefs.putUChar("subida", govSubidaPct);
+  prefs.putUChar("reduzir", govReduzirPct);
+  prefs.putULong("segurar", govSegurarMs);
+  prefs.end();
+}
+
+static void govMostrar() {
+  Serial.printf("governo X: quedas para reduzir %u, fator de aceleracao %u%%, fator de desaceleracao"
+                " %u%%, mantem %lu ms depois de subir\n",
+                govQuedas, govSubidaPct, govReduzirPct, (unsigned long)govSegurarMs);
+  Serial.printf("   queda = encoder < %u%% do motor numa janela de %lu ms; recupera a cada %lu ms;"
+                " rotacao minima %lu passos/s; %lu reducao(oes) desde o boot\n",
+                GOV_QUEDA_PCT, (unsigned long)GOV_JANELA_MS, (unsigned long)GOV_INTERVALO_MS,
+                (unsigned long)GOV_VEL_MIN, (unsigned long)gov_quedas(&govX));
+}
+
+// G -> mostra;  GQ2 quedas para reduzir;  GA50 fator de aceleração (% do que
+// falta, por tentativa);  GD70 fator de desaceleração (% mantido na queda);
+// GS1000 mantém depois de subir (ms, >= 1000);  G0 volta aos padrões.
+static void comandoGoverno(String resto) {
+  resto.trim();
+  resto.toUpperCase();
+  if (resto.length()) {
+    char sub = resto[0];
+    String num = resto.substring(1);
+    num.trim();
+    long v = num.toInt();
+    bool numOk = num.length() > 0 && (v != 0 || num == "0");
+    switch (sub) {
+      case 'Q':
+        if (!numOk || v < 1 || v > 20) {
+          Serial.printf("quedas invalidas: '%s' (1 a 20)\n", num.c_str());
+          return;
+        }
+        govQuedas = (uint8_t)v;
+        break;
+      case 'A':
+        if (!numOk || v < 5 || v > 100) {
+          Serial.printf("fator de aceleracao invalido: '%s' (5 a 100 %%)\n", num.c_str());
+          return;
+        }
+        govSubidaPct = (uint8_t)v;
+        break;
+      case 'D':
+        if (!numOk || v < 10 || v > 95) {
+          Serial.printf("fator de desaceleracao invalido: '%s' (10 a 95 %%)\n", num.c_str());
+          return;
+        }
+        govReduzirPct = (uint8_t)v;
+        break;
+      case 'S':
+        if (!numOk || v < (long)GOV_SEGURAR_MS_MIN || v > 30000) {
+          Serial.printf("tempo invalido: '%s' (%lu a 30000 ms)\n", num.c_str(),
+                        (unsigned long)GOV_SEGURAR_MS_MIN);
+          return;
+        }
+        govSegurarMs = (uint32_t)v;
+        break;
+      case '0':
+        govQuedas = GOV_QUEDAS_PADRAO;
+        govSubidaPct = GOV_SUBIDA_PCT_PADRAO;
+        govReduzirPct = GOV_REDUZIR_PCT_PADRAO;
+        govSegurarMs = GOV_SEGURAR_MS_MIN;
+        break;
+      default:
+        Serial.printf("comando invalido: 'G%s' (G, GQ2, GA50, GD70, GS1000, G0)\n", resto.c_str());
+        return;
     }
+    GovCfg c = govMontarCfg();
+    gov_configurar(&govX, &c);  // vale na hora, sem perder a rotação atual
+    govSalvar();
   }
-  Serial.println("!!! X parado e solto, Z parado e segurando. Confira o eixo, tire o obstaculo e envie A");
-  alarmeAviso = millis();
+  govMostrar();
 }
 
-static void dispararAlarme(const char *motivo, int32_t erro_cont) {
-  stepper_release(&motX);  // para NA HORA e tira a força: não fica empurrando
-  stepper_abort(&motZ);    // Z para, mas SEGURA (solto, ele desceria pelo peso)
-  andando = false;
-  andandoZ = false;
-  alarme = true;
-  alarmeMotivo = motivo;
-  alarmeErro = erro_cont;
-  alarmeTinhaReferencia = referenciado;
-  alarmeX = referenciado ? posicaoMm() : 0.0f;
-  referenciado = false;  // perdeu passo: a posição em mm não vale mais
-  if (seq_ativo(&seq) || seq_estado(&seq) == SEQ_PAUSADO) {
-    seq_cancelar(&seq);  // a ação (frear) não importa: o motor já está solto
-    stepper_set_speed(&motX, velocidade);
-    stepper_set_speed(&motZ, velocidadeZ);
-    Serial.println("-- programa cancelado pelo alarme --");
+// Chamar com frequência (loop e esperas bloqueantes): a cada GOV_AMOSTRA_MS
+// mede motor x encoder, baixa ou recupera a rotação e aplica na hora.
+// Encoder do X sem sinal? Soma os passos do motor desde a última vez que o
+// encoder mudou; passou de ENC_SEM_SINAL_MM sem mudar nada = sem sinal.
+static int32_t encUltimaLeitura = 0;
+static int32_t encMotorRef = 0;
+static uint32_t encPassosSemMudar = 0;
+
+static void vigiarSinalEncoder() {
+  int32_t e = encoder_count(&encX);
+  int32_t m = stepper_position(&motX);
+  if (e != encUltimaLeitura) {
+    encUltimaLeitura = e;
+    encMotorRef = m;
+    encPassosSemMudar = 0;
+    if (encSemSinal) {
+      encSemSinal = false;
+      Serial.println("[encoder X] voltou a contar: faca o homing (h) para a posicao valer de novo");
+    }
+    return;
   }
-  digitalWrite(ALARME_LED, HIGH);
-  avisarAlarme();
+  encPassosSemMudar += (uint32_t)(m > encMotorRef ? m - encMotorRef : encMotorRef - m);
+  encMotorRef = m;
+  if (encSemSinal || encPassosSemMudar < (uint32_t)(ENC_SEM_SINAL_MM * passosPorMm)) return;
+  encSemSinal = true;
+  malha_cancelar(&malhaX);  // não corrige por uma posição falsa
+  referenciado = false;     // a posição do X (encoder) não vale
+  // Sem velocidade real, o governo não tem o que medir: volta ao setpoint.
+  GovCfg c = govMontarCfg();
+  gov_init(&govX, &c, contagensPorMm / passosPorMm);
+  govAplicar();
+  Serial.printf("[encoder X] SEM SINAL: o motor andou %.1f mm e o encoder nao mudou nenhuma contagem"
+                " (fica em %ld). Posicao do X perdida. Confira o cabo do encoder (GPIO %u/%u), o 3V3"
+                " e o acoplamento; teste: e + girar o fuso a mao\n",
+                encPassosSemMudar / passosPorMm, (long)e, ENC_X_A, ENC_X_B);
 }
 
-// Chamar com frequência. true = alarme ativo (quem chamou deve parar).
+static void governarX() {
+  uint32_t agora = millis();
+  if (agora - govUltimoMs < GOV_AMOSTRA_MS) return;
+  govUltimoMs = agora;
+  vigiarSinalEncoder();
+  StepperPerfil p;
+  stepper_get_profile(&motX, &p);
+  gov_setpoint(&govX, p.vmax);  // setpoint = velocidade pedida para este movimento
+  uint32_t antes = gov_limite(&govX);
+  // Sem sinal do encoder não há velocidade real para comparar: o governo fica de fora.
+  GovEvento ev = gov_amostra(&govX, agora, stepper_busy(&motX) && !govSuspenso && !encSemSinal,
+                             stepper_position(&motX), encoder_count(&encX));
+  govAplicar();
+  if (ev == GOV_QUEDA_CONTADA) {
+    Serial.printf("[vel X] queda %u/%u: encoder %.2f mm/s, motor %.2f mm/s (%ld%%): ainda nao reduz\n",
+                  gov_seguidas(&govX), govQuedas, realMmS(), gov_vel_motor(&govX) / passosPorMm,
+                  (long)gov_aproveitamento(&govX));
+  } else if (ev == GOV_QUEDA) {
+    Serial.printf("[vel X] CAIU (%u queda(s) seguida(s)): encoder %.2f mm/s, motor %.2f mm/s"
+                  " (%ld%%, setpoint %.2f mm/s): rotacao %lu -> %lu passos/s (mais torque)\n",
+                  govQuedas,
+                  realMmS(), gov_vel_motor(&govX) / passosPorMm, (long)gov_aproveitamento(&govX),
+                  spMmS(), (unsigned long)(antes < p.vmax ? antes : p.vmax),
+                  (unsigned long)gov_limite(&govX));
+  } else if (ev == GOV_SUBIU) {
+    Serial.printf("[vel X] tentando recuperar: rotacao %lu passos/s (%.2f mm/s) de %.2f mm/s;"
+                  " mantem pelo menos %lu ms\n",
+                  (unsigned long)gov_limite(&govX), gov_limite(&govX) / passosPorMm, spMmS(),
+                  (unsigned long)govSegurarMs);
+  } else if (ev == GOV_RECUPEROU) {
+    Serial.printf("[vel X] setpoint recuperado: %.2f mm/s (%lu passos/s)\n", spMmS(),
+                  (unsigned long)gov_setpoint_atual(&govX));
+  }
+}
+
+// Chamar com frequência. Sempre false: nunca manda parar.
 static bool vigiarColisao() {
-  if (alarme) return true;
+  if (encSemSinal) {  // encoder parado por falta de sinal não é travamento
+    colisao_rearmar(&colisao);
+    return false;
+  }
   uint32_t vel = stepper_speed_now(&motX);
   if (!colisao_atualizar(&colisao, stepper_busy(&motX), stepper_moves(&motX),
                          stepper_position(&motX), encoder_count(&encX))) {
     return false;
   }
-  alarmeJanEsp = colisao.esperado_j;
-  alarmeJanMed = colisao.medido_j;
-  alarmeVel = vel;
-  dispararAlarme("COLISAO", 0);
-  return true;
+  // NUNCA para o motor (decisão do Gab, 2026-11-15: nada de parar por
+  // interpretação do encoder). Só baixa a rotação ao vivo, sem interromper o
+  // movimento nem o homing; a cada 1 s o governo tenta recuperar o setpoint.
+  // Conta como queda (GQ quedas seguidas para reduzir; ignorada nos GS ms
+  // depois de subir).
+  bool reduziu = gov_travou(&govX, vel);
+  govAplicar();
+  colisao_rearmar(&colisao);  // o movimento continua: vigia de novo a partir daqui
+  if (reduziu) {
+    Serial.printf("[trava X] encoder parado a %lu passos/s: rotacao baixa para %lu passos/s"
+                  " (sem parar; tenta recuperar a cada 1 s)\n",
+                  (unsigned long)vel, (unsigned long)gov_limite(&govX));
+  } else if (gov_segurando_ms(&govX) > 0) {
+    Serial.printf("[trava X] encoder parado a %lu passos/s: mantendo a rotacao (acabou de subir)\n",
+                  (unsigned long)vel);
+  } else {
+    Serial.printf("[trava X] encoder parado a %lu passos/s: queda %u/%u, ainda nao reduz\n",
+                  (unsigned long)vel, gov_seguidas(&govX), govQuedas);
+  }
+  return false;
 }
 
-// C -> mostra;  C0 -> desliga a proteção (testes);  C1 -> liga de novo.
+// Telemetria para o painel: SEMPRE uma linha "@T" (andando a cada TELEM_MS,
+// parado a cada TELEM_PARADO_MS) com a posição pelo encoder e os alvos.
+static uint32_t telemUltimo = 0;
+
+
+static void telemetria() {
+  uint32_t agora = millis();
+  bool andando = stepper_busy(&motX) || stepper_busy(&motZ) || malha_ativa(&malhaX);
+  // Sempre manda a posição: andando a cada TELEM_MS, parado a cada TELEM_PARADO_MS
+  // (o carro mexido à mão também aparece).
+  if (agora - telemUltimo < (andando ? TELEM_MS : TELEM_PARADO_MS)) return;
+  telemUltimo = agora;
+  if (stepper_busy(&motZ)) {
+    zAlvoPassos = stepper_position(&motZ) + stepper_remaining(&motZ);
+    zTemAlvo = true;
+  }
+  uint32_t vx = stepper_speed_now(&motX);
+  uint32_t vz = stepper_speed_now(&motZ);
+  uint32_t lim = gov_limite(&govX);
+  uint32_t sp = gov_setpoint_atual(&govX);
+  // Campo 3 = contagens cruas do encoder (a posição do X é só o encoder).
+  Serial.printf("@T %lu %.2f %ld %lu %.2f %lu %.2f %lu %.2f %d%d %lu %lu", (unsigned long)agora,
+                encoderMm(), (long)encoder_count(&encX), (unsigned long)vx, vx / passosPorMm,
+                (unsigned long)(lim < sp ? lim : sp), zMm(), (unsigned long)vz, vz / zPassosPorMm,
+                referenciado ? 1 : 0, zReferenciado ? 1 : 0,
+                (unsigned long)lroundf(gov_vel_real(&govX)), (unsigned long)sp);
+  // Alvo do X (pelo encoder: mm e contagens) e estado da malha: m = movendo,
+  // c = chegou, f = ficou fora da tolerância, - = sem alvo. Depois o alvo do Z.
+  MalhaEstado me = malha_estado(&malhaX);
+  if (me == MALHA_PARADA) {
+    Serial.print(" - - -");
+  } else {
+    int32_t a = malha_alvo(&malhaX);
+    Serial.printf(" %.2f %ld %c", contagensParaMm(a), (long)a,
+                  me == MALHA_MOVENDO ? 'm' : (me == MALHA_CHEGOU ? 'c' : 'f'));
+  }
+  if (zTemAlvo) {
+    EixoMm ez = eixoZmm();
+    Serial.printf(" %.2f", eixo_passos_para_mm(&ez, zAlvoPassos));
+  } else {
+    Serial.print(" -");
+  }
+  // Sinal do encoder X: ok, ou SEMSINAL (motor andou e o encoder não mudou nada).
+  Serial.println(encSemSinal ? " SEMSINAL" : " ok");
+}
+
+// V -> mostra;  V1.8 -> setpoint de velocidade do X em mm/s (o mesmo que 'v' em passos/s).
+static void comandoSetpointVel(String resto) {
+  resto.trim();
+  if (resto.length()) {
+    float mm = lerMm(resto);
+    float max = VEL_LIMITE / passosPorMm;
+    if (!(mm > 0.0f)) {
+      Serial.printf("setpoint invalido: '%s' (use 0 < mm/s <= %.2f)\n", resto.c_str(), max);
+      return;
+    }
+    if (mm > max) {
+      Serial.printf("acima do limite (%.2f mm/s = %lu passos/s): ficou no limite\n", max,
+                    (unsigned long)VEL_LIMITE);
+      mm = max;
+    }
+    velocidade = (uint32_t)lroundf(mm * passosPorMm);
+    if (velocidade < 1) velocidade = 1;
+    stepper_set_speed(&motX, velocidade);
+  }
+  StepperPerfil p;
+  stepper_get_profile(&motX, &p);
+  uint32_t lim = gov_limite(&govX);
+  Serial.printf("setpoint X: %.2f mm/s (%lu passos/s); rotacao agora %lu passos/s%s;"
+                " encoder %.2f mm/s (aproveitamento %ld%%)\n",
+                p.vmax / passosPorMm, (unsigned long)p.vmax,
+                (unsigned long)(lim < p.vmax ? lim : p.vmax),
+                lim < p.vmax ? " (reduzida: tenta recuperar a cada 1 s)" : "", realMmS(),
+                (long)gov_aproveitamento(&govX));
+}
+
+// C -> mostra;  C0 -> desliga a detecção (testes);  C1 -> liga de novo.
 // Desligada não volta sozinha: o boot sempre liga.
 static void comandoColisao(String resto) {
   resto.trim();
   if (resto == "0" || resto == "1") {
     colisao_habilitar(&colisao, resto == "1");
+    aplicarTravaHoming();  // o travamento do homing segue a detecção
     if (resto == "0") {
-      Serial.println("-- protecao contra colisao DESLIGADA: batidas NAO param o motor (C1 liga) --");
+      Serial.println("-- deteccao de travamento DESLIGADA: o X nao baixa a rotacao se travar (C1 liga) --");
+      Serial.println("   o travamento do homing tambem fica desligado: se a chave falhar, o carro"
+                     " vai ate o batente (fique no PARAR)");
     }
   } else if (resto.length()) {
     Serial.printf("comando invalido: 'C%s' (C, C0, C1)\n", resto.c_str());
     return;
   }
-  Serial.printf("protecao contra colisao: %s, janela %ld contagens (%.1f mm), avanco minimo %u%%, "
+  Serial.printf("deteccao de travamento: %s, janela %ld contagens (%.1f mm), avanco minimo %u%%, "
                 "%u janelas seguidas\n",
                 colisao.habilitado ? "ligada" : "DESLIGADA", (long)COLISAO_JANELA_CONT,
                 COLISAO_JANELA_CONT / contagensPorMm, COLISAO_FRACAO_PCT, COLISAO_CONFIRMAR);
+  comandoSetpointVel("");
+  govMostrar();
   Serial.printf("   ultimo movimento: pior avanco %ld%%, erro total max %ld contagens (%.2f mm)\n",
                 (long)colisao_pior_pct(&colisao), (long)colisao_erro_max(&colisao),
                 colisao_erro_max(&colisao) / contagensPorMm);
 }
 
-// No loop: pisca o LED (2 Hz) e repete o aviso enquanto o alarme durar.
-static void sinalizarAlarme() {
-  if (!alarme) return;
-  digitalWrite(ALARME_LED, (millis() / 250) & 1);
-  if (millis() - alarmeAviso >= ALARME_REPETE_MS) avisarAlarme();
+// ---------- homing do X: ajustes e diagnóstico (comando H) ----------
+// Valem até reiniciar a placa. Para ficar, mude configurarHoming().
+
+static void aplicarTravaHoming() {
+  homingX.fsm.janela_trava = colisao.habilitado ? homTravaPassos : 0;
 }
 
-static void reconhecerAlarme() {
-  if (!alarme) {
-    Serial.print("sem alarme. ");
-    comandoColisao("");
+static void mostrarHoming() {
+  Serial.printf("homing X: sentido %+d ('%s' vai para a chave), rapida %lu passos/s, lenta %lu passos/s, "
+                "travamento %ld passos (%s)\n",
+                homingX.sentido, giroNome(homingX.sentido), (unsigned long)homingX.vel_rapida,
+                (unsigned long)homingX.vel_lenta, (long)homTravaPassos,
+                homingX.fsm.janela_trava > 0 ? "ligado" : "DESLIGADO");
+  Serial.printf("   chave X no GPIO %u: %s agora\n", HOME_X,
+                eixo_chave_crua(&eixoX) ? "ACIONADA" : "solta");
+}
+
+// HD: anda 2 mm para a chave (ou afastando, se ela já está apertada) e diz
+// o que o encoder e a chave fizeram. Quem olha o carro confirma o sentido.
+static const float HD_MM = 2.0f;
+
+static void diagnosticoHoming() {
+  bool apertada = eixo_chave_crua(&eixoX);
+  Serial.println("-- diagnostico do homing X (Enter com qualquer tecla cancela) --");
+  Serial.printf("1) chave X: %s (GPIO %u = %s). Apertando com a mao tem que virar ACIONADA (HIGH)\n",
+                apertada ? "ACIONADA" : "solta", HOME_X, digitalRead(HOME_X) ? "HIGH" : "LOW");
+  int8_t dir = apertada ? (int8_t)-homingX.sentido : homingX.sentido;
+  int32_t passos = (int32_t)lroundf(HD_MM * passosPorMm);
+  Serial.printf("2) andando %.0f mm %s (giro '%s'): OLHE o carro\n", HD_MM,
+                apertada ? "AFASTANDO da chave (ela ja esta apertada)" : "PARA a chave", giroNome(dir));
+  int32_t enc0 = encoder_count(&encX);
+  // Indo para a chave: para se ela acionar no caminho (mesmo debounce do homing).
+  if (!apertada) {
+    stepper_sensor_arm(&motX, HOME_X, !eixoX.ativa_em_baixo, true,
+                       (uint16_t)((uint64_t)EIXO_CHAVE_DEBOUNCE_US * STEPPER_TICK_HZ / 1000000u));
+  }
+  stepper_start(&motX, dir * passos, true);
+  bool cancelou = false;
+  while (stepper_busy(&motX)) {
+    if (cancelarPelaSerial(nullptr)) {
+      stepper_release(&motX);
+      cancelou = true;
+      break;
+    }
+    delay(1);
+  }
+  stepper_sensor_disarm(&motX);
+  delay(5);  // última transição passa pelo debounce do encoder
+  int32_t pos;
+  bool acionou = stepper_sensor_fired(&motX, &pos);
+  stepper_release(&motX);
+  referenciado = false;  // andou sem atualizar a origem da chave? por segurança, refazer o h
+  if (cancelou) {
+    Serial.println("-- diagnostico cancelado --");
     return;
   }
-  alarme = false;
-  alarmeJanEsp = alarmeJanMed = 0;
-  colisao_rearmar(&colisao);
-  digitalWrite(ALARME_LED, LOW);
-  Serial.println("-- alarme reconhecido. Faca o homing (h) antes de usar posicoes em mm --");
+  int32_t enc = encoder_count(&encX) - enc0;
+  float esp = dir * passos * contagensPorMm / passosPorMm;
+  Serial.printf("   encoder: %+ld contagens (esperado ~%+.0f): ", (long)enc, esp);
+  if (enc > -2 && enc < 2) {
+    Serial.println("PARADO -> encoder solto/desligado, ou o motor nao girou (teste as bobinas)");
+  } else if ((enc > 0) != (esp > 0)) {
+    Serial.println("AO CONTRARIO -> troque os fios A e B do encoder (ou ENC_X_A/ENC_X_B no pins.h)");
+  } else if (fabsf((float)enc) < 0.6f * fabsf(esp)) {
+    Serial.println("bem menos que o esperado -> motor perdendo passo ou encoder patinando");
+  } else {
+    Serial.println("ok");
+  }
+  if (acionou) Serial.println("   a chave ACIONOU no caminho: o sentido para a chave esta certo");
+  Serial.printf("3) o carro foi %s? Se foi para o lado contrario, o sentido esta trocado: envie HS%+d\n",
+                apertada ? "para LONGE da chave" : "na direcao da chave", -homingX.sentido);
+  Serial.println("   (HS vale ate reiniciar; para ficar, mude homingX.sentido em configurarHoming)");
+}
+
+// ---------- homing geral e testes de todos os eixos ----------
+//   HA -> homing de todos os eixos: Z (desce até a chave) e depois X.
+//   E  -> teste de todos: homing do que faltar, Z sobe ao topo, teste do X
+//         e teste do Z.
+//   EX -> teste do X: vai a TESTE_X_PONTOS pelo encoder (erro e correções
+//         em cada um) e refaz o homing: a chave tem que acionar no mesmo
+//         lugar (até TESTE_X_ORIGEM_TOL_CONT contagens).
+//   EZ -> teste do Z: vai a TESTE_Z_PONTOS e refaz o homing. Sem encoder, a
+//         distância entre a chave e onde ela deveria estar = passos perdidos.
+//   Qualquer tecla cancela. Resultado: "== teste do X: OK ==" (ou FALHOU).
+
+static const float TESTE_X_PONTOS[] = {60.0f, 200.0f, 125.0f, 40.0f};  // mm
+static const float TESTE_Z_PONTOS[] = {0.0f, 30.0f, 10.0f, 35.0f};     // mm (acima do fundo, 40)
+static const int32_t TESTE_X_ORIGEM_TOL_CONT = 2;  // ±0,2 mm
+static const float TESTE_Z_ORIGEM_TOL_MM = 0.5f;
+
+enum TesteRes { TESTE_OK, TESTE_FALHOU, TESTE_CANCELADO };
+static const char *testeNome(TesteRes r) {
+  return r == TESTE_OK ? "OK" : (r == TESTE_FALHOU ? "FALHOU" : "CANCELADO");
+}
+
+// Erro da malha do X (contagens, alvo - encoder) em mm no sentido da coordenada.
+static float xErroMm(int32_t cont) { return -homingX.sentido * cont / contagensPorMm; }
+
+// Espera a malha do X terminar (bloqueia). false = cancelado pela serial.
+static bool xEsperarMalha() {
+  while (xOcupado()) {
+    if (cancelarPelaSerial(nullptr)) {  // também vigia o travamento
+      malha_cancelar(&malhaX);
+      stepper_release(&motX);
+      return false;
+    }
+    xAtualizarMalha();
+    delay(1);
+  }
+  return true;
+}
+
+// Resultado de teste para um homing do X que não deu certo.
+static TesteRes xHomingFalhou() {
+  return (xUltimoHome.erro == HOM_ERRO_CANCELADO && !homTravou) ? TESTE_CANCELADO : TESTE_FALHOU;
+}
+
+// Leva o Z a 'mm' e espera (bloqueia). false = cancelado.
+static bool zIrEsperando(float mm) {
+  EixoMm e = eixoZmm();
+  stepper_set_speed(&motZ, velocidadeZ);
+  zIniciar(eixo_mm_para_passos(&e, mm));
+  return zEsperarParar();
+}
+
+// Nada rodando? Senão avisa e devolve false.
+static bool podeTestar() {
+  if (seq_ativo(&seq) || seq_estado(&seq) == SEQ_PAUSADO) {
+    Serial.println("programa rodando ou pausado: q cancela");
+    return false;
+  }
+  if (ocupado()) return false;
+  if (stepper_busy(&motZ)) {
+    Serial.println("Z andando: espere parar");
+    return false;
+  }
+  return true;
+}
+
+static TesteRes homingGeral() {
+  Serial.println("== homing de todos os eixos: Z (DESCE ate a chave) e depois X ==");
+  if (Z_TEM_CHAVE) {
+    if (!fazerHomingZ()) {
+      Serial.println("== homing geral: FALHOU no Z ==");
+      return TESTE_FALHOU;
+    }
+  } else if (!zReferenciado) {
+    Serial.println("Z sem chave e sem referencia: leve ao topo e envie ZR");
+    Serial.println("== homing geral: FALHOU no Z ==");
+    return TESTE_FALHOU;
+  }
+  fazerHoming();
+  if (!referenciado) {
+    Serial.println("== homing geral: FALHOU no X ==");
+    return xHomingFalhou();
+  }
+  Serial.printf("== homing geral: OK (X %.2f mm, Z %.2f mm) ==\n", encoderMm(), zMm());
+  return TESTE_OK;
+}
+
+static TesteRes testeX() {
+  Serial.println("== teste do X: pontos pelo encoder e repeticao da chave ==");
+  if (!referenciado) {
+    Serial.println("X sem referencia: homing antes");
+    fazerHoming();
+    if (!referenciado) {
+      Serial.println("== teste do X: FALHOU (homing) ==");
+      return TESTE_FALHOU;
+    }
+  }
+  stepper_set_speed(&motX, velocidade);
+  bool ok = true;
+  float piorMm = 0.0f;
+  uint32_t correcoes = 0;
+  const size_t n = sizeof TESTE_X_PONTOS / sizeof TESTE_X_PONTOS[0];
+  for (size_t i = 0; i < n; i++) {
+    float alvo = TESTE_X_PONTOS[i];
+    uint32_t t0 = millis();
+    xIr(alvo);
+    if (!xEsperarMalha()) {
+      TesteRes r = TESTE_CANCELADO;
+      Serial.printf("== teste do X: %s (ponto %.2f mm) ==\n", testeNome(r), alvo);
+      return r;
+    }
+    bool chegou = malha_estado(&malhaX) == MALHA_CHEGOU;
+    float erro = xErroMm(malha_erro(&malhaX));
+    if (fabsf(erro) > fabsf(piorMm)) piorMm = erro;
+    correcoes += malha_correcoes(&malhaX);
+    if (!chegou) ok = false;
+    Serial.printf("[teste X] %u/%u alvo %.2f mm: encoder %.2f mm (%ld cont), erro %+.2f mm, "
+                  "%u correcao(oes), %.1f s -> %s\n",
+                  (unsigned)(i + 1), (unsigned)n, alvo, encoderMm(), (long)encoder_count(&encX), erro,
+                  malha_correcoes(&malhaX), (millis() - t0) / 1000.0f, chegou ? "ok" : "NAO CHEGOU");
+  }
+  Serial.printf("[teste X] pior erro %+.2f mm, %lu correcao(oes) no total\n", piorMm,
+                (unsigned long)correcoes);
+
+  // Volta à chave: com a origem certa ela aciona no mesmo lugar (~0).
+  Serial.println("[teste X] refazendo o homing: a chave tem que acionar na origem");
+  fazerHoming();
+  if (!referenciado) {
+    Serial.println("== teste do X: FALHOU (homing de volta) ==");
+    return xHomingFalhou();
+  }
+  int32_t dc = xUltimoHome.enc_na_chave;
+  bool origemOk = dc >= -TESTE_X_ORIGEM_TOL_CONT && dc <= TESTE_X_ORIGEM_TOL_CONT;
+  Serial.printf("[teste X] chave a %+ld cont (%+.2f mm) da origem pelo encoder (limite +-%ld) -> %s\n",
+                (long)dc, dc / contagensPorMm, (long)TESTE_X_ORIGEM_TOL_CONT,
+                origemOk ? "ok" : "FORA");
+  if (!origemOk) ok = false;
+  TesteRes r = ok ? TESTE_OK : TESTE_FALHOU;
+  Serial.printf("== teste do X: %s ==\n", testeNome(r));
+  return r;
+}
+
+static TesteRes testeZ() {
+  Serial.println("== teste do Z: pontos (malha aberta) e repeticao da chave ==");
+  if (!zReferenciado) {
+    if (!Z_TEM_CHAVE) {
+      Serial.println("Z sem referencia: leve ao topo e envie ZR");
+      Serial.println("== teste do Z: FALHOU (sem referencia) ==");
+      return TESTE_FALHOU;
+    }
+    Serial.println("Z sem referencia: homing antes");
+    if (!fazerHomingZ()) {
+      Serial.println("== teste do Z: FALHOU (homing) ==");
+      return TESTE_FALHOU;
+    }
+  }
+  const size_t n = sizeof TESTE_Z_PONTOS / sizeof TESTE_Z_PONTOS[0];
+  for (size_t i = 0; i < n; i++) {
+    float alvo = TESTE_Z_PONTOS[i];
+    uint32_t t0 = millis();
+    if (!zIrEsperando(alvo)) {
+      Serial.println("== teste do Z: CANCELADO ==");
+      return TESTE_CANCELADO;
+    }
+    Serial.printf("[teste Z] %u/%u alvo %.2f mm: Z %.2f mm (motor %ld passos), %.1f s -> ok\n",
+                  (unsigned)(i + 1), (unsigned)n, alvo, zMm(), (long)stepper_position(&motZ),
+                  (millis() - t0) / 1000.0f);
+  }
+  bool ok = true;
+  if (Z_TEM_CHAVE) {
+    Serial.println("[teste Z] refazendo o homing: a chave tem que acionar onde estava");
+    if (!fazerHomingZ()) {
+      Serial.println("== teste do Z: FALHOU (homing de volta) ==");
+      return TESTE_FALHOU;
+    }
+    if (zUltimaDifValida) {
+      float mm = zUltimaDif / zPassosPorMm;
+      bool origemOk = fabsf(mm) <= TESTE_Z_ORIGEM_TOL_MM;
+      Serial.printf("[teste Z] chave a %+ld passos (%+.2f mm) de onde deveria (limite +-%.1f mm) -> %s\n",
+                    (long)zUltimaDif, mm, TESTE_Z_ORIGEM_TOL_MM, origemOk ? "ok" : "FORA (perdeu passo)");
+      if (!origemOk) ok = false;
+    }
+    Serial.println("[teste Z] voltando ao topo (Z = 0)");
+    if (!zIrEsperando(0.0f)) {
+      Serial.println("== teste do Z: CANCELADO ==");
+      return TESTE_CANCELADO;
+    }
+  } else {
+    Serial.println("[teste Z] sem chave (Z_TEM_CHAVE = false): sem conferencia da origem");
+  }
+  TesteRes r = ok ? TESTE_OK : TESTE_FALHOU;
+  Serial.printf("== teste do Z: %s ==\n", testeNome(r));
+  return r;
+}
+
+static void testeTodos() {
+  Serial.println("== teste de todos os eixos (qualquer tecla cancela) ==");
+  if (!referenciado || !zReferenciado) {
+    TesteRes h = homingGeral();
+    if (h != TESTE_OK) {
+      Serial.printf("== teste de todos os eixos: %s (homing) ==\n", testeNome(h));
+      return;
+    }
+  }
+  Serial.println("[teste] Z sobe ao topo antes de o X andar");
+  if (!zIrEsperando(0.0f)) {
+    Serial.println("== teste de todos os eixos: CANCELADO ==");
+    return;
+  }
+  TesteRes x = testeX();
+  if (x == TESTE_CANCELADO) {
+    Serial.println("== teste de todos os eixos: CANCELADO ==");
+    return;
+  }
+  TesteRes z = testeZ();
+  bool ok = x == TESTE_OK && z == TESTE_OK;
+  Serial.printf("== teste de todos os eixos: %s (X %s, Z %s) ==\n",
+                z == TESTE_CANCELADO ? "CANCELADO" : (ok ? "OK" : "FALHOU"), testeNome(x),
+                testeNome(z));
+}
+
+// E -> todos;  EX -> só o X;  EZ -> só o Z.
+static void comandoEnsaio(String resto) {
+  resto.trim();
+  resto.toUpperCase();
+  if (resto.length() && resto != "X" && resto != "Z") {
+    Serial.printf("comando invalido: 'E%s' (E, EX, EZ)\n", resto.c_str());
+    return;
+  }
+  if (!podeTestar()) return;
+  cancelarPrograma();
+  if (resto == "X") {
+    testeX();
+  } else if (resto == "Z") {
+    testeZ();
+  } else {
+    testeTodos();
+  }
+  stepper_set_speed(&motX, velocidade);
+  stepper_set_speed(&motZ, velocidadeZ);
+}
+
+// H -> mostra;  HV500 rápida;  HL150 lenta;  HT256 janela de travamento (0 = desliga);
+// HS+1 / HS-1 sentido;  HD diagnóstico (anda 2 mm);  HA homing de todos os eixos.
+static void comandoHoming(String resto) {
+  resto.trim();
+  if (resto.length() == 0) {
+    mostrarHoming();
+    return;
+  }
+  char sub = resto[0];
+  String num = resto.substring(1);
+  num.trim();
+  long v = num.toInt();
+  switch (sub) {
+    case 'V':
+    case 'L':
+      if (v <= 0 || v > (long)VEL_LIMITE) {
+        Serial.printf("velocidade invalida: '%s' (use 1 a %lu passos/s)\n", num.c_str(),
+                      (unsigned long)VEL_LIMITE);
+        return;
+      }
+      if (sub == 'V') homingX.vel_rapida = (uint32_t)v;
+      else homingX.vel_lenta = (uint32_t)v;
+      break;
+    case 'T':
+      if (v < 0 || v > 8 * PASSOS_POR_VOLTA || (num.length() == 0)) {
+        Serial.printf("janela invalida: '%s' (0 = desliga, ate %ld passos)\n", num.c_str(),
+                      (long)(8 * PASSOS_POR_VOLTA));
+        return;
+      }
+      homTravaPassos = (int32_t)v;
+      aplicarTravaHoming();
+      break;
+    case 'S':
+      if (v != 1 && v != -1) {
+        Serial.printf("sentido invalido: '%s' (HS+1 = chave no lado 'f', HS-1 = lado 'b')\n", num.c_str());
+        return;
+      }
+      if (v != homingX.sentido) {
+        homingX.sentido = (int8_t)v;
+        referenciado = false;  // a coordenada em mm muda de lado
+        cancelarPrograma();
+        Serial.println("-- sentido do homing trocado: faca o homing (h) de novo --");
+      }
+      break;
+    case 'D':
+      if (seq_ativo(&seq)) {
+        Serial.println("programa rodando: P pausa, q cancela");
+        return;
+      }
+      if (ocupado()) return;
+      diagnosticoHoming();
+      imprimir();
+      return;
+    case 'A':
+      if (!podeTestar()) return;
+      homingGeral();
+      imprimir();
+      return;
+    default:
+      Serial.printf("comando invalido: 'H%s' (H, HV, HL, HT, HS, HD, HA)\n", resto.c_str());
+      return;
+  }
+  mostrarHoming();
 }
 
 // ---------- eixo Z: comandos (malha aberta) ----------
@@ -1437,6 +2310,11 @@ static void comandoZ(String resto) {
       StepperPerfil p;
       stepper_get_profile(&motZ, &p);
       if (sub == 'A') {
+        if (v > ACEL_LIMITE) {
+          Serial.printf("acima do limite (%lu passos/s2): ficou no limite\n",
+                        (unsigned long)ACEL_LIMITE);
+          v = ACEL_LIMITE;
+        }
         p.acel = v;
       } else {
         if (v == 0 || v > Z_VEL_LIMITE) {
@@ -1452,10 +2330,6 @@ static void comandoZ(String resto) {
   }
 
   // Daqui para baixo mexe no motor Z.
-  if (alarme) {
-    Serial.printf("ALARME ativo (%s): envie A para reconhecer\n", alarmeMotivo);
-    return;
-  }
   if (seq_ativo(&seq)) {
     Serial.println("programa rodando: P pausa, q cancela");
     return;
@@ -1463,9 +2337,14 @@ static void comandoZ(String resto) {
   if (sub == 'L') {
     stepper_release(&motZ);
     andandoZ = false;
-    zReferenciado = false;  // solto, o Z pode descer: a posição deixa de valer
     cancelarPrograma();
-    Serial.println("-- Z solto: SEM corrente o Z pode descer pelo peso. Referencia perdida --");
+    if (Z_SEGURAR) {
+      zReferenciado = false;  // sem corrente o Z pode descer: a posição deixa de valer
+      Serial.println("-- Z solto: SEM corrente o Z pode descer pelo peso. Referencia perdida --");
+    } else {
+      // A caixa de redução segura: a referência continua valendo.
+      Serial.println("-- Z parado e solto (a caixa de reducao segura; referencia mantida) --");
+    }
     return;
   }
   if (stepper_busy(&motZ)) {
@@ -1591,8 +2470,12 @@ static void medirVelocidade(String resto) {
   encoder_start(&encX);
   stepper_release(&motX);
 
-  // O encoder não contou a volta: realinha com o motor.
-  encoder_reset(&encX, (int32_t)lroundf(stepper_position(&motX) * contagensPorMm / passosPorMm));
+  // O encoder ficou desligado na volta: a posição dele não vale mais. NÃO
+  // copia dos passos do motor (a referência do X é só o encoder): refaça o homing.
+  if (referenciado) {
+    referenciado = false;
+    Serial.println("-- o encoder ficou desligado na volta: posicao do X perdida, faca o homing (h) --");
+  }
 
   relatarTrecho("encoder LIGADO", passos, us_on, ideal);
   relatarTrecho("encoder PARADO", passos, us_off, ideal);
@@ -1650,9 +2533,12 @@ struct ResultadoMov {
   int32_t erro_fim;
 };
 
+// Alvo do motor (em passos) para levar o carro a 'mm', medido a partir de onde
+// o ENCODER diz que ele está: a referência é o encoder, os passos só executam.
 static int32_t alvoMm(float mm) {
   EixoMm e = eixoMm();
-  return eixo_mm_para_passos(&e, mm);
+  return stepper_position(&motX) + eixo_mm_para_passos(&e, mm) -
+         eixo_mm_para_passos(&e, encoderMm());
 }
 static int32_t modulo32(int32_t v) { return v < 0 ? -v : v; }
 
@@ -1721,20 +2607,27 @@ static bool prepararTeste(float fim_mm) {
     fazerHoming();
     if (!referenciado) return false;
   }
-  ResultadoMov r = medirMovimento(alvoMm(TESTE_A_MM), false, 0);
-  return r.ok;
+  // Vai ao começo do teste pelo ENCODER (não pelos passos do motor).
+  xIr(TESTE_A_MM);
+  return xEsperarMalha();
 }
 
 static void varrerVelocidadeSemProtecao(String resto);
 
 // A varredura procura de propósito a velocidade em que o motor perde passo:
-// com a proteção ligada, ela viraria alarme de colisão no primeiro erro.
+// com a detecção ligada, ela baixaria a rotação no primeiro erro (e o governo
+// limitaria a velocidade): os dois ficam desligados durante a varredura.
 static void varrerVelocidade(String resto) {
   colisao_habilitar(&colisao, false);
-  Serial.println("   protecao contra colisao DESLIGADA durante a varredura");
+  govSuspenso = true;
+  stepper_set_limit(&motX, 0);
+  Serial.println("   deteccao de travamento e governo DESLIGADOS durante a varredura");
   varrerVelocidadeSemProtecao(resto);
   colisao_habilitar(&colisao, true);
-  Serial.println("   protecao contra colisao religada");
+  govSuspenso = false;
+  govAplicado = 0;  // força reaplicar o limite
+  govAplicar();
+  Serial.println("   deteccao de travamento e governo religados");
 }
 
 static void varrerVelocidadeSemProtecao(String resto) {
@@ -1874,6 +2767,25 @@ void setup() {
   delay(200);
   Serial.println();
   Serial.println("== Bancada: eixo X + eixo Z ==");
+  // Por que a placa (re)iniciou: queda de tensão (BROWNOUT) quando os
+  // motores arrancam também para tudo e parece um alarme.
+  {
+    esp_reset_reason_t rr = esp_reset_reason();
+    const char *nome = "OUTRO";
+    switch (rr) {
+      case ESP_RST_POWERON: nome = "LIGOU (energia ou botao EN)"; break;
+      case ESP_RST_EXT: nome = "RESET externo"; break;
+      case ESP_RST_SW: nome = "reset por software"; break;
+      case ESP_RST_PANIC: nome = "PANIC (o programa travou)"; break;
+      case ESP_RST_INT_WDT:
+      case ESP_RST_TASK_WDT:
+      case ESP_RST_WDT: nome = "WATCHDOG (o programa ficou preso)"; break;
+      case ESP_RST_BROWNOUT: nome = "BROWNOUT (queda de tensao: fonte/USB fraca para os motores)"; break;
+      case ESP_RST_DEEPSLEEP: nome = "deep sleep"; break;
+      default: break;
+    }
+    Serial.printf("reinicio: %s\n", nome);
+  }
   Serial.println("f = volta p/ frente, b = volta p/ tras, q = para, l = solta, r = zera");
   Serial.println("f3 / b0.5 = numero de voltas (sem numero = 1)");
   Serial.println("v800 = vel. maxima, a1500 = aceleracao (a0 sem rampa), n300 = partida");
@@ -1881,17 +2793,24 @@ void setup() {
   Serial.println("           p/o = proxima/anterior fase, T0 = fim do teste");
   Serial.println("e = liga/desliga monitor do encoder (A e B crus)");
   Serial.println("h = homing, c3 = auto calibracao (3 ciclos), s = mostra a chave");
+  Serial.println("H = ajustes do homing X: HV500 rapida, HL150 lenta, HT256 travamento (0 desliga),");
+  Serial.println("           HS+1 / HS-1 sentido da chave, HD diagnostico (anda 2 mm e confere)");
+  Serial.println("V = setpoint de velocidade do X em mm/s (V1.8); pelo encoder: caiu -> menos rotacao, tenta recuperar a cada 1 s");
+  Serial.println("G = governo: GQ2 quedas para reduzir, GA50 fator de aceleracao %, GD70 fator de desaceleracao %, GS1000 mantem (ms), G0 padroes");
+  Serial.println("HA = homing de todos os eixos (Z desce ate a chave, depois o X)");
+  Serial.println("E = teste de todos os eixos, EX so o X, EZ so o Z (homing, pontos e repeticao da chave)");
   Serial.println("d100 = calibra distancia, m99.6 = medida real, k = calibracao (k0 = nominal)");
   Serial.printf("x120 = vai para X = 120 mm (centro do braco, %.0f a %.0f mm; depois do homing)\n",
                 X_HOME_MM, X_HOME_MM + CURSO_X_MM);
+  Serial.println("x+10 / x-1 = anda / volta em mm pelo ENCODER (vale sem homing, a partir da leitura atual)");
   Serial.printf("Z (topo 0 a %.0f mm, malha aberta): ZH homing, Z+5 desce, Z-5 sobe, ZR = topo aqui,\n",
                 CURSO_Z_MM);
   Serial.println("           Z40 vai (h faz o homing do Z antes do X, se faltar)");
   Serial.println("           ZV300 velocidade, ZA600 aceleracao, ZN150 partida, ZD50 / ZM49.6 calibra,");
-  Serial.println("           ZK calibracao, ZL solta (cai!)");
+  Serial.println("           ZK calibracao, ZL solta as bobinas");
   Serial.println("setpoints: S lista, S<x> <z> [mm/s] [ms] acrescenta (ex.: S120 40), S-2 / S- apaga");
   Serial.println("           R / R3 / R0 executa 1x / 3x / sem fim, P pausa/continua, q cancela");
-  Serial.println("colisao: para, solta o motor e liga o ALARME; A reconhece (depois h); C mostra, C0/C1");
+  Serial.println("travou (encoder parado): o X baixa a rotacao e continua, sem alarme; C mostra, C0/C1");
   Serial.println("t, t2 = mede a velocidade com o encoder ligado e parado");
   Serial.println("w = varredura de velocidade (acha o limite), g = grava a curva da rampa (CSV)");
   Serial.printf("encoder: amostra a cada %u us (%u Hz), debounce %u us = %u amostras\n",
@@ -1903,6 +2822,9 @@ void setup() {
   // Chave ativa em HIGH: chave NA para 3V3 e pull-down de 10 kΩ externo
   // para GND. false = ativa em HIGH.
   eixo_begin(&eixoX, &motX, &encX, HOME_X, false, false);
+  // Pull-down interno junto com o externo: sem o resistor (ou com o fio no
+  // pino errado) a entrada não fica no ar dando "apertado" falso.
+  pinMode(HOME_X, INPUT_PULLDOWN);
   configurarHoming();
   pinMode(ALARME_LED, OUTPUT);
   digitalWrite(ALARME_LED, LOW);
@@ -1910,8 +2832,21 @@ void setup() {
   colisao_init(&colisao, &cc, CONTAGENS_MM_NOMINAL / PASSOS_MM_NOMINAL);
   carregarCalibracao();
   colisao_escala(&colisao, contagensPorMm / passosPorMm);
-  Serial.printf("protecao contra colisao: ligada, a cada %.1f mm o encoder anda >= %u%% (C0 desliga)\n",
+  govCarregar();
+  GovCfg gc = govMontarCfg();
+  gov_init(&govX, &gc, contagensPorMm / passosPorMm);
+  govMostrar();
+  stepper_set_limit(&motX, gov_limite(&govX));
+  MalhaCfg mc = {MALHA_TOL_CONT, MALHA_CORRECOES};
+  malha_init(&malhaX, &mc, passosPorMm / contagensPorMm);
+  Serial.printf("X pela posicao do ENCODER: tolerancia %.2f mm, ate %u correcoes\n",
+                MALHA_TOL_CONT / contagensPorMm, MALHA_CORRECOES);
+  Serial.printf("limites dos motores: %lu passos/s, %lu passos/s2\n", (unsigned long)VEL_LIMITE,
+                (unsigned long)ACEL_LIMITE);
+  Serial.printf("deteccao de travamento: ligada, a cada %.1f mm o encoder anda >= %u%% (C0 desliga)\n",
                 COLISAO_JANELA_CONT / contagensPorMm, COLISAO_FRACAO_PCT);
+  aplicarTravaHoming();
+  mostrarHoming();
   mostrarCalibracao();
   carregarPrograma();
   listarPrograma();
@@ -1921,7 +2856,7 @@ void setup() {
   stepper_set_profile(&motX, &perfil);
   mostrarPerfil();
 
-  // Z: liga as bobinas já no boot (o fuso de alto avanço não segura sozinho).
+  // Z: só liga as bobinas no boot se Z_SEGURAR (padrão: soltas, a caixa segura).
   stepper_begin(&motZ, MOT_Z_IN1, MOT_Z_IN2, MOT_Z_IN3, MOT_Z_IN4);
   StepperPerfil pz = {Z_PARTIDA, velocidadeZ, Z_ACEL};
   stepper_set_profile(&motZ, &pz);
@@ -1929,6 +2864,7 @@ void setup() {
   if (Z_SEGURAR) stepper_hold(&motZ);
   // Chave do Z: igual à do X (NA para 3V3 + pull-down externo de 10 kΩ).
   eixo_begin(&eixoZ, &motZ, nullptr, HOME_Z, false, false);
+  pinMode(HOME_Z, INPUT_PULLDOWN);  // idem ao X
   configurarHomingZ();
   chaveZAnterior = eixo_chave_crua(&eixoZ);
   if (Z_TEM_CHAVE) {
@@ -1944,11 +2880,6 @@ static void executar(const String &linha) {
   char c = linha[0];
   String resto = linha.substring(1);
   // Programa rodando: só ele mexe no motor (pausado, os comandos manuais valem).
-  // Alarme: nada mexe no motor até reconhecer com 'A'.
-  if (strchr("fbhcdxtrwg1234poRPT", c) && alarme) {
-    Serial.printf("ALARME ativo (%s): confira o eixo e envie A para reconhecer\n", alarmeMotivo);
-    return;
-  }
   if (strchr("fbhcdxtrwg1234poRT", c) && seq_ativo(&seq)) {
     Serial.println("programa rodando: P pausa, q cancela");
     return;
@@ -1960,6 +2891,7 @@ static void executar(const String &linha) {
     case 'b': mover(-1, resto); return;
     case 'q':
       if (cancelarPrograma()) return;
+      malha_cancelar(&malhaX);
       stepper_stop(&motX);
       stepper_stop(&motZ);
       Serial.println("-- freando --");
@@ -1968,10 +2900,13 @@ static void executar(const String &linha) {
     case 'S': comandoSetpoint(resto); return;
     case 'R': rodarPrograma(resto); return;
     case 'P': pausarOuContinuar(); return;
-    case 'A': reconhecerAlarme(); return;
     case 'C': comandoColisao(resto); return;
+    case 'H': comandoHoming(resto); return;
     case 'T': comandoTeste(resto); return;
+    case 'E': comandoEnsaio(resto); break;
     case 'v': ajustarVelocidade(resto); return;
+    case 'V': comandoSetpointVel(resto); return;
+    case 'G': comandoGoverno(resto); return;
     case 'a': ajustarAceleracao(resto); return;
     case 'n': ajustarPartida(resto); return;
     case 'h': fazerHoming(); break;
@@ -1985,12 +2920,14 @@ static void executar(const String &linha) {
     case 'w': varrerVelocidade(resto); return;
     case 'g': gravarCurva(resto); return;
     case 'l':
+      malha_cancelar(&malhaX);
       stepper_release(&motX);
-      stepper_abort(&motZ);  // Z para, mas continua segurando (ZL solta)
+      zPararNaHora();  // Z para (solto, a menos que Z_SEGURAR)
       cancelarPrograma();
       andando = false;
       andandoZ = false;
-      Serial.println("-- X solto; Z parado e segurando (ZL solta o Z) --");
+      Serial.println(Z_SEGURAR ? "-- X solto; Z parado e segurando (ZL solta o Z) --"
+                               : "-- X e Z parados e soltos --");
       break;
     case 'r':
       stepper_reset(&motX, 0);
@@ -2041,12 +2978,16 @@ static void vigiarChave() {
 }
 
 void loop() {
+  // O homing bloqueia: chegou aqui, ele acabou.
+  homCtx.ativo = false;
   if (monitorEncoder) monitorarEncoder();
   vigiarChave();
-  vigiarColisao();  // antes do sequenciador: colisão cancela o programa
-  sinalizarAlarme();
+  vigiarColisao();    // travou: baixa a rotação e continua (ou desiste)
+  xAtualizarMalha();  // antes do sequenciador: ele espera a malha terminar
+  governarX();        // limite de velocidade sobe com o tempo andando sem travar
+  telemetria();       // "@T" para o painel desenhar posição e velocidade
   atualizarSequencia();
-  if (andando && !stepper_busy(&motX)) {
+  if (andando && !xOcupado()) {
     andando = false;
     Serial.printf("-- parou (pior avanco %ld%%, erro total max %ld cont) -- ",
                   (long)colisao_pior_pct(&colisao), (long)colisao_erro_max(&colisao));
