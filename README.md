@@ -368,7 +368,7 @@ do X: chave NA para 3V3 + resistor de 10 kΩ do GPIO para o GND (acionada = HIGH
   e volta devagar; onde a chave aciona vira **Z = 80 mm** (`Z_HOME_MM`) e o motor **continua
   segurando**. A coordenada não muda: Z = 0 continua no topo. **Confira que não há nada
   embaixo do braço** antes do homing do Z.
-  O `h` (homing do X) e o `R` fazem o `ZH` antes, se o Z estiver sem referência.
+  O `R` faz o `ZH` antes, se o Z estiver sem referência.
   Ao ligar a placa, o Z está sem referência.
 - Sem encoder o homing do Z não vê travamento: se a chave não acionar, o Z desce
   até curso + 20 mm (o 28BYJ-48 só pula passo no batente) e dá erro `CURSO`.
@@ -379,7 +379,7 @@ do X: chave NA para 3V3 + resistor de 10 kΩ do GPIO para o GND (acionada = HIGH
   O homing do Z usa 250 / 120 passos/s.
 - **Sem encoder, não há proteção contra colisão no Z**: se perder passo, fica
   deslocado sem aviso. Refaça o `ZH` de vez em quando.
-- O homing do X (`h`, e o `R` sem referência) sobe o Z ao topo antes.
+- O homing do X (`h`) **não mexe no Z**. O `R` faz o `ZH` antes, se o Z estiver sem referência.
 - `s` mostra as duas chaves (X e Z), para conferir a fiação.
 
 | Comando | Faz |

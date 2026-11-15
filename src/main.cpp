@@ -48,8 +48,8 @@
 //   Esse fuso NÃO trava sozinho: as bobinas do Z ficam SEMPRE ligadas (o motor
 //   esquenta; sem corrente o Z desce pelo peso).
 //   ZH        -> homing do Z: DESCE até a chave, sobe 2 mm, volta devagar;
-//                Z = 80 (fundo) na chave e continua segurando. O 'h' (homing
-//                do X) e o 'R' fazem o ZH antes, se faltar, e sobem o Z ao topo.
+//                Z = 80 (fundo) na chave e continua segurando. O 'R' faz o ZH
+//                antes, se faltar. O homing do X ('h') NÃO mexe no Z.
 //                Confira que não há nada embaixo do braço antes.
 //   Z+5 / Z-5 -> desce / sobe 5 mm (vale sem referência)
 //   ZR        -> "aqui é o topo": Z = 0 (referência manual, sem a chave)
@@ -612,29 +612,10 @@ static bool fazerHomingZ() {
   return zReferenciado;
 }
 
-// Antes de o X andar o curso todo: Z no topo, para o braço não arrastar.
-// Sem referência, faz o homing do Z (desce até a chave) e depois sobe.
-static bool zSubirAoTopo() {
-  if (!zReferenciado) {
-    if (!Z_TEM_CHAVE) {
-      Serial.println("atencao: Z sem referencia (ZR): confira que o Z esta no alto");
-      return true;
-    }
-    if (!fazerHomingZ()) return false;
-  }
-  if (stepper_position(&motZ) == 0) return true;
-  Serial.printf("subindo o Z ao topo (de %.2f mm)\n", zMm());
-  stepper_set_speed(&motZ, velocidadeZ);
-  zIniciar(0);
-  return zEsperarParar();
-}
-
+// Homing do X: só o X anda. O Z fica onde está (decisão do Gab, 2026-11-15:
+// a chave do X fica embaixo e o braço não precisa subir para o X andar).
 static void fazerHoming() {
   Serial.println("-- homing (Enter com qualquer tecla cancela) --");
-  if (!zSubirAoTopo()) {
-    Serial.println("-- homing do X nao feito: o Z precisa estar no topo antes --");
-    return;
-  }
   EixoHomeResult r;
   eixo_home(&eixoX, &homingX, &r);
   sincronizarChave();

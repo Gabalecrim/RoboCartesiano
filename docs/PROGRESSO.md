@@ -30,7 +30,7 @@ Os testes do PC (`pio test -e native`) rodam: 115/115 (gcc instalado via WinLibs
   o Gab trocou o IN1 de 23 para 14). O 14 dá pulsos no boot: no máximo um tranco no Z.
 - **Homing do Z** (`ZH`): chave NA **embaixo** (Z = 80 mm na chave; o zero continua no topo), GPIO 4 (escolha do Gab), pull-down externo de 10 kΩ.
   Usa `lib/homing` + `lib/eixo` sem encoder (`enc = NULL`, sem janela de travamento) e
-  termina segurando (`EixoHomingCfg.segurar`). `h` e `R` fazem o `ZH` antes, se faltar.
+  termina segurando (`EixoHomingCfg.segurar`). o `R` faz o `ZH` antes, se faltar.
   `Z_TEM_CHAVE = false` volta para a referência manual (`ZR`).
 - Fuso igus de alto avanço, 8 entradas x ~3 mm = 24 mm/volta (85,33 passos/mm),
   **a confirmar** com `ZD50` + `ZM<medida>`. Curso 80 mm, Z = 0 no topo.
@@ -39,7 +39,7 @@ Os testes do PC (`pio test -e native`) rodam: 115/115 (gcc instalado via WinLibs
 - Referência manual (`ZR` no topo) continua valendo; sem proteção contra colisão no Z.
 - Setpoints agora têm X e Z (`S<x> <z> [mm/s] [ms]`); o sequenciador anda um eixo por
   vez (Z sobe primeiro / X anda primeiro quando o Z desce). Programa do formato antigo é apagado.
-- O homing do X sobe o Z ao topo antes (com `ZH`, se o Z estiver sem referência).
+- O homing do X (`h`) não mexe no Z (2026-11-15: a chave do X fica embaixo, o braço não precisa subir).
 - Painel (`tools/painel.html`): campo Z, coluna Z, quadro do Z (homing, sobe/desce, zerar, ir).
 
 ### A decidir / medir
