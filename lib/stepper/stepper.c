@@ -158,6 +158,7 @@ bool stepper_start(Stepper *m, int32_t steps, bool soltar_ao_fim) {
   m->sensor_disparou = false;
   m->sensor_cont = 0;
   m->ativo = rampa_ativa(&r);
+  if (m->ativo) m->movimentos++;
   if (!m->ativo) m->sensor_armado = false;
   portEXIT_CRITICAL(&m->mux);
   return true;
@@ -168,6 +169,8 @@ bool stepper_start_to(Stepper *m, int32_t alvo, bool soltar_ao_fim) {
 }
 
 bool stepper_busy(const Stepper *m) { return m->ativo; }
+
+uint32_t stepper_moves(const Stepper *m) { return m->movimentos; }
 
 void stepper_stop(Stepper *m) {
   portENTER_CRITICAL(&m->mux);

@@ -54,6 +54,7 @@ typedef struct Stepper {
   StepperPerfil perfil;
   Rampa rampa;            // usada pela interrupção
   volatile bool ativo;
+  volatile uint32_t movimentos;  // conta os stepper_start que andaram (1 por movimento)
   bool soltar_ao_fim;     // desligar as bobinas quando terminar
 
   // Parada por sensor
@@ -84,6 +85,8 @@ void stepper_set_speed(Stepper *m, uint32_t steps_per_s);  // só a vmax
 bool stepper_start(Stepper *m, int32_t steps, bool soltar_ao_fim);
 bool stepper_start_to(Stepper *m, int32_t alvo, bool soltar_ao_fim);  // posição absoluta
 bool stepper_busy(const Stepper *m);
+// Muda a cada movimento novo (para quem vigia o movimento saber que começou outro).
+uint32_t stepper_moves(const Stepper *m);
 void stepper_stop(Stepper *m);   // freia pela rampa
 void stepper_abort(Stepper *m);  // para já (as bobinas continuam ligadas)
 uint32_t stepper_speed_now(Stepper *m);  // passos/s neste instante (0 parado)
