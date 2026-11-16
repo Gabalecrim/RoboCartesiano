@@ -3,9 +3,9 @@
 uint8_t stepseq_coils(uint8_t phase) {
   static const uint8_t TABLE[4] = {
       0b0011,  // fase 0: IN1 + IN2
-      0b0110,  // fase 1   TODO
-      0b1100,  // fase 2   TODO
-      0b1001,  // fase 3   TODO
+      0b0110,  // fase 1: IN2 + IN3
+      0b1100,  // fase 2: IN3 + IN4
+      0b1001,  // fase 3: IN4 + IN1
   };
   return TABLE[phase & 0x3];
 }

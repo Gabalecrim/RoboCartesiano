@@ -23,12 +23,14 @@
 // Enquanto ela estiver zerada, eles falham. Esse é o ponto de partida.
 
 int8_t quadratureDelta(uint8_t prev, uint8_t curr) {
+  // X = QUAD_INVALID (os dois bits mudaram juntos)
+  static const int8_t X = QUAD_INVALID;
   static const int8_t TABLE[16] = {
       //  curr: 00  01  10  11
-      0, -1, 1, 0,  // prev = 00   TODO
-      1, 0, 0, -1,  // prev = 01   TODO
-      -1, 0, 0, 1,  // prev = 10   TODO
-      0, 1, -1, 0,  // prev = 11   TODO
+      0,  +1, -1, X,   // prev = 00
+      -1, 0,  X,  +1,  // prev = 01
+      +1, X,  0,  -1,  // prev = 10
+      X,  -1, +1, 0,   // prev = 11
   };
   return TABLE[((prev & 0x3) << 2) | (curr & 0x3)];
 }

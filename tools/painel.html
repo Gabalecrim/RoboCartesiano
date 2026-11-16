@@ -1,0 +1,1876 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bancada X e Z</title>
+<!--
+  Painel da bancada, pela USB (Web Serial). Abrir no Chrome ou no Edge.
+  FECHE o Serial Monitor do VS Code antes: a porta só abre em um programa.
+  Os botões só mandam os comandos de texto do main.cpp (o mesmo que digitar).
+
+  Organização:
+    barra fixa  -> conexão, estado dos eixos e PARAR (Esc em qualquer lugar)
+    Operar      -> homing e mover X / Z; diagnóstico do homing X (chave, sentido,
+                   encoder, ajustes HV/HL/HT/HS, homing sem detecção)
+    travadas    -> chip com quantas vezes o X travou e baixou a rotação (sem alarme)
+    Programa    -> setpoints (com "usar posição atual") e execução
+    Ajustes     -> velocidades e calibrações (passo 1 / passo 2)
+    Testes      -> bobinas, chaves, varredura, curva, medição, encoder
+    Registro    -> sempre visível (lado direito na tela larga)
+-->
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --txt: #1d2330; --sub: #5b6474; --borda: #d9dde4;
+    --pri: #1f6feb; --pri-txt: #ffffff; --ok: #1a7f37; --ok-bg: #dafbe1;
+    --aviso: #9a6700; --aviso-bg: #fff8c5; --alarme: #cf222e; --alarme-bg: #ffebe9;
+    --log-bg: #0f1520; --log-txt: #d6e2f0; --log-env: #7ee787; --log-sub: #8b949e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0d1117; --card: #161b22; --txt: #e6edf3; --sub: #8b949e; --borda: #30363d;
+      --pri: #2f81f7; --ok: #3fb950; --ok-bg: #12261a; --aviso: #d29922; --aviso-bg: #2b2111;
+      --alarme: #ff7b72; --alarme-bg: #3d1417; --log-bg: #010409; --log-txt: #c9d1d9;
+    }
+  }
+  * { box-sizing: border-box; }
+  /* ---------- movimento ao vivo ---------- */
+  .vivo-pos { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; margin-bottom: 8px; }
+  .vivo-pos div { background: var(--bg); border: 1px solid var(--borda); border-radius: 8px; padding: 8px 12px; }
+  .vivo-pos span { display: block; font-size: 12px; color: var(--sub); }
+  .vivo-pos b { display: block; font-size: 26px; line-height: 1.2; font-variant-numeric: tabular-nums; }
+  .vivo-pos small { display: block; font-size: 12px; color: var(--sub); font-variant-numeric: tabular-nums; }
+  .vivo-num { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 10px; }
+  .vivo-num div { background: var(--bg); border: 1px solid var(--borda); border-radius: 8px; padding: 6px 10px; }
+  .vivo-num span { display: block; font-size: 12px; color: var(--sub); }
+  .vivo-num b { font-size: 18px; font-variant-numeric: tabular-nums; }
+  .graf { width: 100%; height: 170px; display: block; background: var(--bg);
+          border: 1px solid var(--borda); border-radius: 8px; margin-top: 6px; }
+  .legenda { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--sub); margin-top: 4px; }
+  .legenda i { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 4px; }
+  body { margin: 0; background: var(--bg); color: var(--txt);
+         font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+
+  /* ---------- barra fixa ---------- */
+  .topo { position: sticky; top: 0; z-index: 5; background: var(--card);
+          border-bottom: 1px solid var(--borda); }
+  .topo-in { max-width: 1400px; margin: 0 auto; padding: 10px 16px; display: flex;
+             flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+  h1 { font-size: 17px; margin: 0; white-space: nowrap; }
+  .conexao { display: flex; gap: 8px; align-items: center; }
+  .ponto { width: 10px; height: 10px; border-radius: 50%; background: var(--sub); }
+  .ponto.on { background: var(--ok); }
+  .estado { display: flex; flex-wrap: wrap; gap: 8px; flex: 1; }
+  .chip { border: 1px solid var(--borda); border-radius: 8px; padding: 4px 10px; font-size: 13px;
+          color: var(--sub); background: var(--bg); white-space: nowrap; }
+  .chip b { color: var(--txt); font-variant-numeric: tabular-nums; font-size: 14px; }
+  .chip.ok { border-color: var(--ok); }
+  .chip.aviso { border-color: var(--aviso); background: var(--aviso-bg); }
+  .chip.aviso b { color: var(--aviso); }
+  .chip.on { border-color: var(--alarme); background: var(--alarme-bg); }
+  .chip.on b { color: var(--alarme); }
+  .parar { display: flex; gap: 8px; margin-left: auto; }
+  button.stop { background: var(--alarme); color: #fff; border-color: var(--alarme);
+                font-weight: 700; padding: 10px 22px; font-size: 16px; letter-spacing: .5px; }
+  #reinicio { display: none; background: var(--aviso-bg); color: var(--aviso);
+              border-top: 1px solid var(--aviso); font-weight: 600; }
+  #reinicio.on { display: block; }
+  #reinicio .topo-in { justify-content: space-between; }
+  .resultado { margin: 8px 0 0; font-size: 13px; padding: 8px 10px; border-radius: 6px;
+               background: var(--bg); border: 1px solid var(--borda); min-height: 20px; }
+  .resultado:empty { display: none; }
+  .resultado.ok { border-color: var(--ok); background: var(--ok-bg); }
+  .resultado.ruim { border-color: var(--alarme); background: var(--alarme-bg); color: var(--alarme); }
+  .grande-estado { font-size: 18px; font-weight: 700; }
+  select { padding: 8px; font-size: 15px; border-radius: 6px; border: 1px solid var(--borda);
+           background: var(--bg); color: var(--txt); }
+
+  /* ---------- layout ---------- */
+  .corpo { max-width: 1400px; margin: 0 auto; padding: 14px 16px 30px; display: grid; gap: 14px;
+           grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 1100px) {
+    .corpo { grid-template-columns: minmax(0, 1fr) 420px; align-items: start; }
+    .lateral { position: sticky; top: 90px; }
+    #log { height: calc(100vh - 230px); }
+  }
+  .abas { display: flex; gap: 4px; border-bottom: 1px solid var(--borda); margin-bottom: 14px;
+          overflow-x: auto; }
+  .aba { border: 0; border-bottom: 3px solid transparent; border-radius: 0; background: none;
+         padding: 10px 16px; font-weight: 600; color: var(--sub); white-space: nowrap; }
+  .aba.sel { color: var(--pri); border-bottom-color: var(--pri); outline: none; }
+  .painel { display: none; gap: 14px; }
+  .painel.sel { display: grid; }
+  .duas { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); }
+
+  .card { background: var(--card); border: 1px solid var(--borda); border-radius: 10px; padding: 14px; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; display: flex; justify-content: space-between;
+             align-items: center; gap: 8px; }
+  .card h3 { font-size: 12px; margin: 16px 0 8px; color: var(--sub); font-weight: 600;
+             text-transform: uppercase; letter-spacing: .4px; }
+  .linha { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+  .linha + .linha { margin-top: 10px; }
+  label { display: grid; gap: 4px; font-size: 13px; color: var(--sub); }
+  input { width: 110px; padding: 8px; font-size: 15px; border-radius: 6px;
+          border: 1px solid var(--borda); background: var(--bg); color: var(--txt); }
+  input.curto { width: 86px; }
+  button { padding: 8px 14px; font-size: 14px; border-radius: 6px; cursor: pointer;
+           border: 1px solid var(--borda); background: var(--card); color: var(--txt); }
+  button:hover:not(:disabled) { border-color: var(--pri); }
+  button.pri { background: var(--pri); color: var(--pri-txt); border-color: var(--pri); font-weight: 600; }
+  button.grande { padding: 11px 20px; font-size: 15px; }
+  button.perigo { color: var(--alarme); border-color: var(--alarme); }
+  button.sel { outline: 2px solid var(--pri); outline-offset: 1px; font-weight: 700; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .dica { color: var(--sub); font-size: 13px; margin: 10px 0 0; }
+  .rot { font-size: 13px; color: var(--sub); align-self: center; }
+  .tag { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 10px;
+         background: var(--bg); color: var(--sub); border: 1px solid var(--borda); }
+  .tag.ok { color: var(--ok); border-color: var(--ok); background: var(--ok-bg); }
+  .tag.aviso { color: var(--aviso); border-color: var(--aviso); background: var(--aviso-bg); }
+
+  /* jog: botões grandes em linha */
+  .jog { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .jog button { padding: 14px 6px; font-size: 15px; font-weight: 600; }
+
+  /* passos das calibrações */
+  .passo { display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: start; padding: 10px;
+           border: 1px solid var(--borda); border-radius: 8px; }
+  .passo + .passo { margin-top: 8px; }
+  .passo .n { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
+              background: var(--bg); border: 1px solid var(--borda); font-weight: 700; font-size: 13px; }
+  .passo.ativo { border-color: var(--pri); }
+  .passo.ativo .n { background: var(--pri); color: #fff; border-color: var(--pri); }
+  .passo p { margin: 0 0 8px; font-size: 13px; color: var(--sub); }
+
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--borda); }
+  th { color: var(--sub); font-weight: 600; font-size: 13px; }
+  td button { padding: 4px 10px; font-size: 13px; }
+  .tabela { overflow-x: auto; }
+  .vazio { color: var(--sub); padding: 8px; }
+
+  .leds { display: inline-flex; gap: 8px; }
+  .led { width: 34px; height: 34px; border-radius: 50%; display: inline-grid; place-items: center;
+         font-size: 13px; font-weight: 700; border: 1px solid var(--borda); color: var(--sub); background: var(--bg); }
+  .led.on { background: var(--alarme); border-color: var(--alarme); color: #fff; box-shadow: 0 0 10px var(--alarme); }
+
+  /* registro */
+  .lateral .card { padding: 12px; }
+  #log { background: var(--log-bg); color: var(--log-txt); border-radius: 8px; padding: 10px;
+         height: 300px; overflow-y: auto; font: 12.5px/1.45 ui-monospace, Consolas, monospace;
+         white-space: pre-wrap; word-break: break-word; }
+  #log .env { color: var(--log-env); }
+  #log .sis { color: var(--log-sub); font-style: italic; }
+  #log .err { color: #ff7b72; font-weight: 600; }
+  .cmd { display: flex; gap: 8px; margin-top: 10px; }
+  .cmd input { flex: 1; width: auto; min-width: 0; font-family: ui-monospace, Consolas, monospace; }
+</style>
+</head>
+<body>
+
+<div class="topo">
+  <div class="topo-in">
+    <h1>Bancada X e Z</h1>
+    <div class="conexao">
+      <span class="ponto" id="ponto"></span>
+      <button id="btnConectar" class="pri">Conectar USB</button>
+    </div>
+    <div class="estado">
+      <span class="chip" id="chipX" title="Posição do X pelo encoder">X <b id="xMotor">—</b></span>
+      <span class="chip" id="chipEnc" title="Leitura crua do encoder do X">encoder X <b id="xEnc">—</b></span>
+      <span class="chip" id="chipAlvo" title="Alvo do X pelo encoder">alvo X <b id="xAlvo">—</b></span>
+      <span class="chip" id="chipY" title="Posição do Y pelo encoder">Y <b id="yTopo">—</b></span>
+      <span class="chip" id="chipDados" title="Linhas de posição (@T) da placa: chegam 4 vezes por segundo parado e 10 andando">dados da placa <b id="dadosEstado">—</b></span>
+      <span class="chip" id="chipZ">Z <b id="zPos">—</b></span>
+      <span class="chip" id="chipChX">chave X <b id="chX">?</b></span>
+      <span class="chip" id="chipChZ">chave Z <b id="chZ">?</b></span>
+      <span class="chip" id="chipChY">chave Y <b id="chY">?</b></span>
+      <span class="chip">programa <b id="seqEstado">parado</b></span>
+      <span class="chip" id="chipProt">detecção de travamento <b id="prot">?</b></span>
+      <span class="chip" id="chipTrava" title="Velocidade real caiu ou travou: o X baixou a rotação (mais torque)">quedas <b id="travas">0</b></span>
+    </div>
+    <div class="parar">
+      <button data-cmd="q" class="stop req" title="Para os dois motores freando e cancela o programa (tecla Esc)">PARAR (Esc)</button>
+      <button data-cmd="l" class="perigo req" title="X e Z param na hora e soltam as bobinas">Parar na hora</button>
+    </div>
+  </div>
+  <div id="reinicio">
+    <div class="topo-in">
+      <span id="reinicioTxt">A placa reiniciou</span>
+      <button id="btnReinicioOk">Entendi</button>
+    </div>
+  </div>
+</div>
+
+<div class="corpo">
+<main>
+  <nav class="abas" role="tablist">
+    <button class="aba sel" data-aba="operar">Operar</button>
+    <button class="aba" data-aba="programa">Programa</button>
+    <button class="aba" data-aba="ajustes">Ajustes e calibração</button>
+    <button class="aba" data-aba="testes">Testes</button>
+  </nav>
+
+  <!-- ================= OPERAR ================= -->
+  <section class="painel sel" id="aba-operar">
+    <div class="card">
+      <h2>Todos os eixos <span class="tag" id="tagHA">—</span></h2>
+      <div class="linha">
+        <button data-cmd="HA" class="pri grande req" data-confirm="Homing de todos os eixos: o Z DESCE até a chave embaixo, depois o X e o Y vão até as chaves deles. Não há nada embaixo da garra?">Homing geral (Z, X e Y)</button>
+        <button data-cmd="E" class="req" data-confirm="Teste de todos os eixos: faz o homing que faltar (o Z desce), sobe o Z, testa o X, o Z e o Y (4 pontos cada e volta à chave). Área livre?">Testar todos os eixos</button>
+      </div>
+      <p class="dica">O teste completo fica na aba Testes. Qualquer botão cancela.</p>
+    </div>
+    <div class="card">
+      <h2>Movimento ao vivo <span class="tag" id="tagVivo">parado</span></h2>
+      <div class="vivo-pos">
+        <div><span>Posição atual do X (encoder)</span><b id="pAtual">—</b><small id="pAtualCont">—</small></div>
+        <div><span>Alvo do X</span><b id="pAlvo">—</b><small id="pAlvoCont">sem alvo</small></div>
+        <div><span>Falta (alvo − atual)</span><b id="pFalta">—</b><small id="pEstado">—</small></div>
+        <div><span>Z atual / alvo</span><b id="pZ">—</b><small id="pZAlvo">sem alvo</small></div>
+      </div>
+      <div class="vivo-num">
+        <div><span>X (encoder)</span><b id="vX">—</b></div>
+        <div><span>Encoder X (leitura)</span><b id="vXm">—</b></div>
+        <div><span>Setpoint X</span><b id="vSp">—</b></div>
+        <div><span>X real (encoder)</span><b id="vReal">—</b></div>
+        <div><span>Rotação do motor X</span><b id="vVx">—</b></div>
+        <div><span>Rotação permitida</span><b id="vLim">—</b></div>
+        <div><span>Z</span><b id="vZ">—</b></div>
+        <div><span>Velocidade Z</span><b id="vVz">—</b></div>
+      </div>
+      <div class="linha">
+        <label>Setpoint de velocidade do X (mm/s)<input id="inSpV" class="curto" type="number" step="0.05" min="0.05" max="1.95" value="1.95"></label>
+        <button data-pre="V" data-in="inSpV" data-obrig="1" class="req">Aplicar</button>
+        <button data-cmd="V" class="req">Ler</button>
+      </div>
+      <h3>Controle de rotação (salvo na placa)</h3>
+      <div class="linha">
+        <label title="Janelas seguidas com o encoder abaixo de 75% do motor antes de baixar a rotação">Quedas para reduzir<input id="inGQ" class="curto" type="number" step="1" min="1" max="20" value="2"></label>
+        <label title="A cada 1 s sem queda, sobe esta % do que falta até o setpoint">Fator de aceleração (%)<input id="inGA" class="curto" type="number" step="5" min="5" max="100" value="50"></label>
+        <label title="Na queda, a rotação fica nesta % da que estava (ou na velocidade real, se menor)">Fator de desaceleração (%)<input id="inGD" class="curto" type="number" step="5" min="10" max="95" value="70"></label>
+        <label title="Depois de subir, a rotação fica pelo menos este tempo sem mudar">Mantém depois de subir (ms)<input id="inGS" class="curto" type="number" step="100" min="1000" max="30000" value="1000"></label>
+        <button id="btnAplicarG" class="pri req">Aplicar</button>
+        <button data-cmd="G" class="req">Ler</button>
+        <button data-cmd="G0" class="req" data-confirm="Voltar o controle de rotação aos padrões (2 quedas, 50%, 70%, 1000 ms)?">Padrões</button>
+      </div>
+      <canvas id="grafPos" class="graf"></canvas>
+      <div class="legenda">
+        <span><i id="lgX"></i>X pelo encoder (mm)</span><span><i id="lgAx"></i>alvo do X</span>
+        <span><i id="lgZ"></i>Z (mm)</span><span><i id="lgAz"></i>alvo do Z</span>
+      </div>
+      <canvas id="grafVel" class="graf"></canvas>
+      <div class="legenda">
+        <span><i id="lgSp"></i>setpoint X</span><span><i id="lgReal"></i>X real (encoder)</span>
+        <span><i id="lgVx"></i>rotação do motor X</span><span><i id="lgVz"></i>Z</span>
+        <span><i id="lgTrava"></i>caiu / travou</span>
+      </div>
+      <p class="dica">Últimos 30 s de movimento, em passos/s (256 passos = 1 mm no X). Se o X real (encoder) cai abaixo de 75% da rotação do motor, a rotação baixa (mais torque); a cada 1 s sem queda ela tenta voltar ao setpoint.</p>
+    </div>
+    <div class="duas">
+      <div class="card">
+        <h2>Eixo X <span class="tag" id="tagX">sem homing</span></h2>
+        <div class="linha">
+          <button data-cmd="h" class="pri grande req">Homing X</button>
+          <label>Ir para X (mm)<input id="inXir" type="number" step="0.5" min="30" max="220" value="120"></label>
+          <button data-pre="x" data-in="inXir" data-obrig="1" class="req">Ir</button>
+        </div>
+        <h3>Mover pelo encoder (vale sem homing)</h3>
+        <div class="jog">
+          <button data-jogx="-10" class="req">◀ 10 mm</button>
+          <button data-jogx="-1" class="req">◀ 1 mm</button>
+          <button data-jogx="1" class="req">1 mm ▶</button>
+          <button data-jogx="10" class="req">10 mm ▶</button>
+        </div>
+        <p class="dica">◀ = rumo à chave do homing, ▶ = afastando. "Ir para" precisa de homing (30 a 220 mm, centro do braço). O homing do X não mexe no Z.</p>
+        <h3>Outros</h3>
+        <div class="linha">
+          <button data-cmd="r" class="req" data-confirm="Zerar motor e encoder do X aqui? A referência do homing se perde.">Zerar motor e encoder aqui</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Eixo Z <span class="tag" id="tagZ">sem referência</span></h2>
+        <div class="linha">
+          <button data-cmd="ZH" class="pri grande req" data-confirm="O homing do Z DESCE o braço até a chave embaixo. Não há nada embaixo da garra?">Homing Z</button>
+          <label>Ir para Z (mm)<input id="inZir" type="number" step="0.5" min="0" max="40" value="0"></label>
+          <button data-pre="Z" data-in="inZir" data-obrig="1" class="req">Ir</button>
+        </div>
+        <h3>Mover (vale sem referência)</h3>
+        <div class="jog">
+          <button data-cmd="Z-10" class="req">▲ 10 mm</button>
+          <button data-cmd="Z-1" class="req">▲ 1 mm</button>
+          <button data-cmd="Z+1" class="req">▼ 1 mm</button>
+          <button data-cmd="Z+10" class="req">▼ 10 mm</button>
+        </div>
+        <p class="dica">Z = 0 no topo, 40 mm embaixo. O homing desce até a chave (Z = 40). Sem referência, ▲▼ não têm limite de curso.</p>
+        <h3>Sem a chave</h3>
+        <div class="linha">
+          <button data-cmd="ZR" class="req" data-confirm="Definir a posição atual do Z como o TOPO (Z = 0)?">Definir aqui como topo (Z = 0)</button>
+          <button data-cmd="ZL" class="perigo req" data-confirm="Soltar as bobinas do Z? A caixa de redução segura o eixo.">Soltar Z</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= EIXO Y (2026-11-15) ================= -->
+    <div class="card" id="cardY">
+      <h2>Eixo Y <span class="tag" id="tagY">sem homing</span></h2>
+      <div class="vivo-pos">
+        <div><span>Posição atual do Y (encoder)</span><b id="yAtual">—</b><small id="yAtualCont">—</small></div>
+        <div><span>Alvo do Y</span><b id="yAlvo">—</b><small id="yAlvoCont">sem alvo</small></div>
+        <div><span>Falta (alvo − atual)</span><b id="yFalta">—</b><small id="yEstado">—</small></div>
+        <div><span>Velocidade do Y</span><b id="yVel">—</b><small id="yVelInfo">—</small></div>
+      </div>
+      <div class="linha">
+        <button data-cmd="YH" class="pri grande req">Homing Y</button>
+        <label>Ir para Y (mm)<input id="inYir" type="number" step="0.5" min="0" max="190" value="95"></label>
+        <button data-pre="Y" data-in="inYir" data-obrig="1" class="req">Ir</button>
+        <button data-cmd="YQ" class="req">Parar Y</button>
+        <button data-cmd="YL" class="perigo req">Soltar Y</button>
+        <button data-cmd="Y" class="req">Ler</button>
+      </div>
+      <h3>Mover pelo encoder (vale sem homing)</h3>
+      <div class="jog">
+        <button data-cmd="Y-10" class="req">◀ 10 mm</button>
+        <button data-cmd="Y-1" class="req">◀ 1 mm</button>
+        <button data-cmd="Y+1" class="req">1 mm ▶</button>
+        <button data-cmd="Y+10" class="req">10 mm ▶</button>
+      </div>
+      <p class="dica">◀ = rumo à chave do homing (Y diminui), ▶ = afastando. "Ir para" precisa de homing (0 a 190 mm).</p>
+      <canvas id="grafY" class="graf"></canvas>
+      <div class="legenda">
+        <span><i id="lgY"></i>Y pelo encoder (mm)</span><span><i id="lgYa"></i>alvo do Y</span>
+      </div>
+      <canvas id="grafYv" class="graf"></canvas>
+      <div class="legenda">
+        <span><i id="lgYsp"></i>setpoint Y</span><span><i id="lgYm"></i>rotação do motor Y</span>
+        <span><i id="lgYr"></i>Y real (encoder)</span>
+      </div>
+      <h3>Velocidade e controle de rotação do Y (salvo na placa)</h3>
+      <div class="linha">
+        <label>Setpoint do Y (mm/s)<input id="inYV" class="curto" type="number" step="0.05" min="0.05" max="1.95" value="1.95"></label>
+        <button data-pre="YV" data-in="inYV" data-obrig="1" class="req">Aplicar</button>
+      </div>
+      <div class="linha">
+        <label>Quedas para reduzir<input id="inYGQ" class="curto" type="number" step="1" min="1" max="20" value="2"></label>
+        <label>Fator de aceleração (%)<input id="inYGA" class="curto" type="number" step="5" min="5" max="100" value="50"></label>
+        <label>Fator de desaceleração (%)<input id="inYGD" class="curto" type="number" step="5" min="10" max="95" value="70"></label>
+        <label>Mantém depois de subir (ms)<input id="inYGS" class="curto" type="number" step="100" min="1000" max="30000" value="1000"></label>
+        <button id="btnAplicarYG" class="pri req">Aplicar</button>
+        <button data-cmd="YG" class="req">Ler</button>
+      </div>
+      <h3>Outros</h3>
+      <div class="linha">
+        <button data-cmd="YR" class="req" data-confirm="Marcar esta posição como Y = 0 (referência manual, sem a chave)?">Aqui é Y = 0</button>
+        <button data-cmd="YF1" class="req">Girar 1 volta f</button>
+        <button data-cmd="YB1" class="req">Girar 1 volta b</button>
+        <button data-cmd="YE" class="req">Monitor do encoder Y</button>
+        <button data-cmd="YT" class="req" data-confirm="Teste do Y: faz o homing se faltar, vai a 4 pontos pelo encoder e refaz o homing. Área livre?">Testar Y</button>
+      </div>
+      <p class="dica">Encoder do Y nos GPIO 33/36, motor nos GPIO 13/16/17/23, chave no GPIO 39 (pull-down externo de 10 kΩ). "Girar 1 volta f" deve levar o carro PARA a chave. Monitor do encoder: gire o fuso com a mão e veja A e B no registro.</p>
+    </div>
+
+    <div class="card" id="cardDiag">
+      <h2>Diagnóstico do homing X <span class="tag" id="tagHom">—</span></h2>
+      <div class="linha">
+        <span class="rot">Fase agora:</span> <span class="grande-estado" id="homFase">—</span>
+      </div>
+      <div class="resultado" id="homRes"></div>
+
+      <div class="duas" style="margin-top:12px">
+        <div>
+          <div class="passo">
+            <span class="n">1</span>
+            <div>
+              <p><b>A chave funciona?</b> Aperte a chave com a mão: tem que mudar para APERTADA e voltar para solta ao soltar.</p>
+              <div class="linha" style="align-items:center">
+                <span class="grande-estado" id="diagChave">?</span>
+                <button data-cmd="s" class="req">Ler chaves</button>
+              </div>
+              <p class="dica" id="diagGpio">Se não muda: fio no pino errado (HOME_X no pins.h), chave NF no lugar de NA ou falta o pull-down.</p>
+            </div>
+          </div>
+          <div class="passo">
+            <span class="n">2</span>
+            <div>
+              <p><b>O sentido e o encoder estão certos?</b> O X anda 2 mm na direção da chave (se ela estiver apertada, anda afastando). <b>Olhe o carro.</b></p>
+              <div class="linha">
+                <button data-cmd="HD" class="pri req">Testar 2 mm (HD)</button>
+              </div>
+              <div class="resultado" id="hdRes"></div>
+              <div class="linha" id="hdPergunta" style="display:none; margin-top:8px">
+                <span class="rot" id="hdPerguntaTxt">O carro foi na direção da chave?</span>
+                <button id="hdSim" class="req">Sim</button>
+                <button id="hdNao" class="perigo req">Não, foi ao contrário</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="passo">
+            <span class="n">3</span>
+            <div>
+              <p><b>Ajustes do homing</b> (valem até reiniciar a placa; para ficar, mude <code>configurarHoming()</code>).</p>
+              <div class="linha">
+                <label>Chave no lado
+                  <select id="inHS"><option value="1">f (+1)</option><option value="-1">b (−1)</option></select>
+                </label>
+                <label>Busca rápida (passos/s)<input id="inHV" class="curto" type="number" step="10" min="1" max="500" value="500"></label>
+                <label>Busca lenta (passos/s)<input id="inHL" class="curto" type="number" step="10" min="1" max="500" value="150"></label>
+                <label>Travamento (passos, 0 = desliga)<input id="inHT" class="curto" type="number" step="64" min="0" value="256"></label>
+              </div>
+              <div class="linha">
+                <button data-cmd="H" class="req">Ler da placa</button>
+                <button id="btnAplicarH" class="pri req">Aplicar</button>
+              </div>
+              <p class="dica">Motor não arranca no começo do homing → baixe a busca rápida (400, 300). Travou logo depois de a chave apertar (no recuo) → folga do fuso: aumente o travamento (512, 768).</p>
+            </div>
+          </div>
+          <div class="passo">
+            <span class="n">4</span>
+            <div>
+              <p><b>Homing sem a detecção de travamento</b>, só para achar o problema: travou não baixa a rotação nem para o homing. Fique com a mão no <b>PARAR (Esc)</b>.</p>
+              <div class="linha">
+                <button data-cmd="C0" class="perigo req" data-confirm="Desligar a detecção de travamento E o travamento do homing? Se a chave falhar o carro vai até o batente: fique no PARAR (Esc).">Desligar detecção</button>
+                <button data-cmd="C1" class="req">Ligar detecção</button>
+                <button data-cmd="h" class="req">Homing X</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= DIAGNÓSTICO DO HOMING Y (2026-11-15) ================= -->
+    <div class="card" id="cardDiagY">
+      <h2>Diagnóstico do homing Y <span class="tag" id="tagHomY">—</span></h2>
+      <div class="linha">
+        <span class="rot">Fase agora:</span> <span class="grande-estado" id="homFaseY">—</span>
+      </div>
+      <div class="resultado" id="homResY"></div>
+      <div class="duas" style="margin-top:12px">
+        <div>
+          <div class="passo">
+            <span class="n">1</span>
+            <div>
+              <p><b>A chave do Y funciona?</b> Aperte a chave com a mão: tem que mudar para APERTADA e voltar para solta ao soltar.</p>
+              <div class="linha" style="align-items:center">
+                <span class="grande-estado" id="diagChaveY">?</span>
+                <button data-cmd="YS" class="req">Ler chave Y</button>
+              </div>
+              <p class="dica">GPIO 39: só entrada e sem pull interno. Se não muda: fio no pino errado (HOME_Y no pins.h), chave NF no lugar de NA ou falta o pull-down de 10 kΩ.</p>
+            </div>
+          </div>
+          <div class="passo">
+            <span class="n">2</span>
+            <div>
+              <p><b>O sentido e o encoder do Y estão certos?</b> O Y anda 2 mm na direção da chave (se ela estiver apertada, anda afastando). <b>Olhe o carro.</b></p>
+              <div class="linha">
+                <button data-cmd="YHD" class="pri req">Testar 2 mm (YHD)</button>
+              </div>
+              <div class="resultado" id="hdResY"></div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="passo">
+            <span class="n">3</span>
+            <div>
+              <p><b>Ajustes do homing Y</b> (valem até reiniciar a placa).</p>
+              <div class="linha">
+                <label>Chave no lado
+                  <select id="inYHS"><option value="1">f (+1)</option><option value="-1">b (−1)</option></select>
+                </label>
+                <label>Busca rápida (passos/s)<input id="inYHV" class="curto" type="number" step="10" min="1" max="500" value="500"></label>
+                <label>Busca lenta (passos/s)<input id="inYHL" class="curto" type="number" step="10" min="1" max="500" value="150"></label>
+                <label>Travamento (passos, 0 = desliga)<input id="inYHT" class="curto" type="number" step="64" min="0" value="0"></label>
+              </div>
+              <div class="linha">
+                <button data-cmd="Y" class="req">Ler da placa</button>
+                <button id="btnAplicarYH" class="pri req">Aplicar</button>
+              </div>
+              <p class="dica">Motor do Y não arranca no começo do homing → baixe a busca rápida (400, 300). Trocar o lado da chave perde a referência do Y.</p>
+            </div>
+          </div>
+          <div class="passo">
+            <span class="n">4</span>
+            <div>
+              <p><b>Homing do Y sem a detecção</b> (governo, encoder sem sinal e travamento do homing), só para achar o problema. Fique com a mão no <b>PARAR (Esc)</b>.</p>
+              <div class="linha">
+                <button data-cmd="YC0" class="perigo req" data-confirm="Desligar a detecção do Y (governo, encoder sem sinal e travamento do homing)?">Desligar detecção</button>
+                <button data-cmd="YC1" class="req">Ligar detecção</button>
+                <button data-cmd="YH" class="req">Homing Y</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= PROGRAMA ================= -->
+  <section class="painel" id="aba-programa">
+    <div class="card">
+      <h2>Novo ponto</h2>
+      <div class="linha">
+        <label>X (mm)<input id="inX" type="number" step="0.1" min="30" max="220" value="120"></label>
+        <label>Z (mm, 0 = topo)<input id="inZ" type="number" step="0.1" min="0" max="40" value="0"></label>
+        <label>Y (mm, vazio = não mexe)<input id="inY" type="number" step="0.1" min="0" max="190" placeholder="—"></label>
+        <label>Velocidade (mm/s)<input id="inV" type="number" step="0.1" min="0" value="0"></label>
+        <label>Espera (ms)<input id="inE" type="number" step="100" min="0" value="0"></label>
+        <button id="btnAtual" class="req" title="Copia X, Z e Y da posição atual dos eixos">Usar posição atual</button>
+        <button id="btnAdicionar" class="pri grande req">Adicionar ponto</button>
+      </div>
+      <p class="dica">Para ensinar um ponto: leve os eixos até ele na aba Operar, clique em "Usar posição atual" e em "Adicionar ponto". Velocidade 0 = padrão de cada eixo. Y vazio = o Y não mexe naquele ponto (o Y anda junto com o X). Enter em qualquer campo também adiciona.</p>
+    </div>
+
+    <div class="card">
+      <h2>Programa salvo na placa <button data-cmd="S" class="req">Atualizar</button></h2>
+      <div id="tabela" class="tabela"><div class="vazio">conecte para ver o programa salvo na placa</div></div>
+      <div class="linha" style="margin-top:14px">
+        <label>Ciclos (0 = sem fim)<input id="inCiclos" class="curto" type="number" step="1" min="0" value="1"></label>
+        <button id="btnExecutar" class="pri grande req">▶ Executar</button>
+        <button data-cmd="P" class="grande req">⏸ Pausar / continuar</button>
+        <button data-cmd="q" class="grande req">■ Cancelar</button>
+        <button data-cmd="S-" class="perigo req" data-confirm="Apagar TODOS os pontos do programa?">Apagar tudo</button>
+      </div>
+      <p class="dica">Um eixo por vez: para subir, o Z sobe antes de o X andar; para descer, o X anda e o Z desce por último. Sem referência, o Executar faz antes o homing do Z (desce!) e o do X.</p>
+    </div>
+  </section>
+
+  <!-- ================= AJUSTES ================= -->
+  <section class="painel" id="aba-ajustes">
+    <div class="duas">
+      <div class="card">
+        <h2>Velocidade do X <button data-cmd="v" class="req">Ler da placa</button></h2>
+        <div class="linha">
+          <label>Máxima (passos/s)<input id="inVel" class="curto" type="number" step="10" min="1" max="500" value="500"></label>
+          <label>Aceleração (passos/s²)<input id="inAcel" class="curto" type="number" step="100" min="0" max="1000" value="1000"></label>
+          <label>Partida (passos/s)<input id="inPart" class="curto" type="number" step="10" min="1" value="300"></label>
+          <button id="btnAplicarX" class="pri req">Aplicar</button>
+        </div>
+        <p class="dica">Limite: 500 passos/s (≈ 1,95 mm/s) e 1000 passos/s². Aceleração 0 = sem rampa. Vale até reiniciar a placa.</p>
+      </div>
+
+      <div class="card">
+        <h2>Velocidade do Z <button data-cmd="Z" class="req">Ler da placa</button></h2>
+        <div class="linha">
+          <label>Máxima (passos/s)<input id="inZV" class="curto" type="number" step="10" min="1" max="500" value="300"></label>
+          <label>Aceleração (passos/s²)<input id="inZA" class="curto" type="number" step="50" min="0" max="1000" value="600"></label>
+          <label>Partida (passos/s)<input id="inZN" class="curto" type="number" step="10" min="1" value="150"></label>
+          <button id="btnAplicarZ" class="pri req">Aplicar</button>
+        </div>
+        <p class="dica">Se o Z não sobe bem, baixe a máxima e a partida (mais devagar = mais torque). 300 passos/s ≈ 3,5 mm/s. Limite: 500 passos/s e 1000 passos/s². Vale até reiniciar.</p>
+      </div>
+
+      <div class="card">
+        <h2>Calibração de distância do X <span class="tag" id="tagCalX">—</span></h2>
+        <div class="passo ativo" id="pX1">
+          <span class="n">1</span>
+          <div>
+            <p>Faz o homing, afasta 2 mm e espera 5 s para você <b>marcar</b> a posição do carro. Depois anda a distância.</p>
+            <div class="linha">
+              <label>Distância (mm)<input id="inDist" class="curto" type="number" step="1" min="1" value="100"></label>
+              <button data-pre="d" data-in="inDist" class="req">Começar</button>
+            </div>
+          </div>
+        </div>
+        <div class="passo" id="pX2">
+          <span class="n">2</span>
+          <div>
+            <p>Meça o deslocamento real desde a marca e envie. A placa calcula e salva.</p>
+            <div class="linha">
+              <label>Medida real (mm)<input id="inMed" class="curto" type="number" step="0.05" min="0" placeholder="99.6"></label>
+              <button data-pre="m" data-in="inMed" data-obrig="1" class="pri req">Enviar medida</button>
+            </div>
+          </div>
+        </div>
+        <div class="linha" style="margin-top:10px">
+          <button data-cmd="k" class="req">Ver calibração</button>
+          <button data-cmd="k0" class="req" data-confirm="Voltar a calibração do X ao nominal (256 passos/mm)?">Voltar ao nominal</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Calibração de distância do Z <span class="tag" id="tagCalZ">—</span></h2>
+        <div class="passo ativo" id="pZ1">
+          <span class="n">1</span>
+          <div>
+            <p>Desce 1 mm, espera 5 s para você <b>marcar</b> o Z e desce a distância. Deixe espaço embaixo.</p>
+            <div class="linha">
+              <label>Distância (mm)<input id="inZD" class="curto" type="number" step="1" min="1" max="79" value="50"></label>
+              <button data-pre="ZD" data-in="inZD" class="req">Começar</button>
+            </div>
+          </div>
+        </div>
+        <div class="passo" id="pZ2">
+          <span class="n">2</span>
+          <div>
+            <p>Meça o deslocamento real e envie. Depois refaça o homing do Z.</p>
+            <div class="linha">
+              <label>Medida real (mm)<input id="inZM" class="curto" type="number" step="0.05" min="0" placeholder="49.6"></label>
+              <button data-pre="ZM" data-in="inZM" data-obrig="1" class="pri req">Enviar medida</button>
+            </div>
+          </div>
+        </div>
+        <div class="linha" style="margin-top:10px">
+          <button data-cmd="ZK" class="req">Ver calibração</button>
+          <button data-cmd="ZK0" class="req" data-confirm="Voltar a calibração do Z ao nominal (24 mm/volta)?">Voltar ao nominal</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Auto calibração do homing X</h2>
+        <div class="linha">
+          <label>Ciclos<input id="inCal" class="curto" type="number" step="1" min="1" value="3"></label>
+          <button data-pre="c" data-in="inCal" class="req">Começar</button>
+        </div>
+        <p class="dica">Homing, recua e volta à chave N vezes: mostra se a origem repete e se o motor perde passo. Qualquer botão cancela.</p>
+      </div>
+
+      <!-- ================= Y: velocidade e calibração (2026-11-15) ================= -->
+      <div class="card">
+        <h2>Velocidade do Y <button data-cmd="YV" class="req">Ler da placa</button></h2>
+        <div class="linha">
+          <label>Máxima (mm/s)<input id="inYVel" class="curto" type="number" step="0.05" min="0.05" max="1.95" value="1.95"></label>
+          <label>Aceleração (passos/s²)<input id="inYAcel" class="curto" type="number" step="100" min="0" max="1000" value="1000"></label>
+          <label>Partida (passos/s)<input id="inYPart" class="curto" type="number" step="10" min="1" max="500" value="300"></label>
+          <button id="btnAplicarYVel" class="pri req">Aplicar</button>
+        </div>
+        <p class="dica">Limite: 500 passos/s (≈ 1,95 mm/s) e 1000 passos/s². Aceleração 0 = sem rampa. Vale até reiniciar a placa.</p>
+      </div>
+
+      <div class="card">
+        <h2>Calibração de distância do Y <span class="tag" id="tagCalY">—</span></h2>
+        <div class="passo ativo" id="pY1">
+          <span class="n">1</span>
+          <div>
+            <p>Faz o homing do Y, afasta 2 mm e espera 5 s para você <b>marcar</b> a posição do carro. Depois anda a distância.</p>
+            <div class="linha">
+              <label>Distância (mm)<input id="inYDist" class="curto" type="number" step="1" min="1" value="100"></label>
+              <button data-pre="YD" data-in="inYDist" class="req">Começar</button>
+            </div>
+          </div>
+        </div>
+        <div class="passo" id="pY2">
+          <span class="n">2</span>
+          <div>
+            <p>Meça o deslocamento real do Y desde a marca e envie. A placa calcula e salva.</p>
+            <div class="linha">
+              <label>Medida real (mm)<input id="inYMed" class="curto" type="number" step="0.05" min="0" placeholder="99.6"></label>
+              <button data-pre="YM" data-in="inYMed" data-obrig="1" class="pri req">Enviar medida</button>
+            </div>
+          </div>
+        </div>
+        <div class="linha" style="margin-top:10px">
+          <button data-cmd="YK" class="req">Ver calibração</button>
+          <button data-cmd="YK0" class="req" data-confirm="Voltar a calibração do Y ao nominal (256 passos/mm)?">Voltar ao nominal</button>
+        </div>
+        <p class="dica" id="calYInfo">—</p>
+      </div>
+
+      <div class="card">
+        <h2>Auto calibração do homing Y</h2>
+        <div class="linha">
+          <label>Ciclos<input id="inYCal" class="curto" type="number" step="1" min="1" value="3"></label>
+          <button data-pre="YCAL" data-in="inYCal" class="req">Começar</button>
+        </div>
+        <p class="dica">Homing do Y, recua 10 voltas e volta à chave N vezes: mostra se a origem repete e se o motor perde passo. Qualquer botão cancela.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= TESTES ================= -->
+  <section class="painel" id="aba-testes">
+    <div class="card">
+      <h2>Teste dos eixos <span class="tag" id="tagTeste">—</span></h2>
+      <div class="linha">
+        <button data-cmd="E" class="pri req" data-confirm="Teste de todos os eixos: faz o homing que faltar (o Z desce), sobe o Z, testa o X, o Z e o Y (4 pontos cada e volta à chave). Área livre?">Testar todos</button>
+        <button data-cmd="EX" class="req" data-confirm="Teste do X: o X vai a 4 pontos e volta à chave. O Z fica onde está: ele está alto o bastante?">Só o X</button>
+        <button data-cmd="EZ" class="req" data-confirm="Teste do Z: o Z sobe e desce entre 0 e 35 mm e depois desce até a chave. Nada embaixo da garra?">Só o Z</button>
+        <button data-cmd="EY" class="req" data-confirm="Teste do Y: faz o homing do Y se faltar, vai a 4 pontos pelo encoder e volta à chave. Área livre?">Só o Y</button>
+        <button data-cmd="HA" class="req" data-confirm="Homing de todos os eixos: o Z DESCE até a chave, depois o X e o Y. Nada embaixo da garra?">Homing geral</button>
+      </div>
+      <ul id="testeLista"></ul>
+      <div class="resultado" id="testeRes"></div>
+      <p class="dica">X: em cada ponto mostra o erro no encoder e as correções; no fim, a chave tem que acionar a ±0,2 mm da origem. Z (sem encoder): a chave tem que acionar a ±0,5 mm de onde deveria; mais que isso = perdeu passo. Qualquer botão cancela.</p>
+    </div>
+    <div class="duas">
+      <div class="card">
+        <h2>Bobinas do motor (ULN2003)</h2>
+        <div class="linha">
+          <span class="rot">Motor:</span>
+          <button id="btnTX" data-cmd="TX" class="req sel">X</button>
+          <button id="btnTZ" data-cmd="TZ" class="req">Z</button>
+          <button id="btnTY" data-cmd="TY" class="req">Y</button>
+          <span id="tGpio" class="rot"></span>
+        </div>
+        <div class="linha" style="align-items:center">
+          <span class="rot">Deve acender na placa:</span>
+          <span class="leds">
+            <span class="led" id="ledA">A</span><span class="led" id="ledB">B</span><span class="led" id="ledC">C</span><span class="led" id="ledD">D</span>
+          </span>
+        </div>
+        <div class="linha">
+          <button data-cmd="1" class="req">IN1</button>
+          <button data-cmd="2" class="req">IN2</button>
+          <button data-cmd="3" class="req">IN3</button>
+          <button data-cmd="4" class="req">IN4</button>
+          <button data-cmd="o" class="req">◀ Fase</button>
+          <button data-cmd="p" class="req">Fase ▶</button>
+        </div>
+        <div class="linha">
+          <button id="btnGiroF" class="req">Girar ↻</button>
+          <button id="btnGiroB" class="req">Girar ↺</button>
+          <button data-cmd="T0" class="pri req">Fim do teste</button>
+        </div>
+        <p class="dica"><span id="tGiro">Girar: X = 1 volta.</span> Compare os LEDs acima com os da placa: diferente = fio trocado. "Fim do teste" solta o X e o Y e volta a segurar o Z. Testar o Z perde a referência dele: segure o eixo. Y: motor nos GPIO 13/16/17/23.</p>
+      </div>
+
+      <div class="card">
+        <h2>Chaves e encoder <button data-cmd="s" class="req">Ler chaves</button></h2>
+        <p class="dica" style="margin-top:0">Aperte a chave com a mão: "chave X" / "chave Z" na barra do topo mudam na hora.</p>
+        <h3>Monitor do encoder X</h3>
+        <div class="linha">
+          <button data-cmd="e" class="req">Liga / desliga</button>
+        </div>
+        <p class="dica">Gire o eixo devagar com a mão: A e B aparecem no registro (11 01 00 10 11).</p>
+        <h3>Detecção de travamento (baixa a rotação e continua)</h3>
+        <div class="linha">
+          <button data-cmd="C" class="req">Ver último movimento</button>
+          <button data-cmd="C0" class="perigo req" data-confirm="Desligar a detecção de travamento? Se o X travar ele NÃO baixa a rotação até religar (ou reiniciar a placa).">Desligar</button>
+          <button data-cmd="C1" class="req">Ligar</button>
+        </div>
+        <p class="dica">"Ver último movimento" mostra o pior avanço do encoder (normal: perto de 100%). Desligue só para testar; ao reiniciar a placa ela volta ligada.</p>
+      </div>
+
+      <div class="card">
+        <h2>Velocidade e rampa do X</h2>
+        <h3>Varredura (acha a velocidade máxima)</h3>
+        <div class="linha">
+          <label>Até (passos/s)<input id="inW" class="curto" type="number" step="50" min="500" placeholder="800"></label>
+          <button data-pre="w" data-in="inW" class="req">Começar</button>
+        </div>
+        <h3>Curva da rampa (CSV no registro)</h3>
+        <div class="linha">
+          <label>Distância (mm)<input id="inG" class="curto" type="number" step="5" min="1" placeholder="30"></label>
+          <button data-pre="g" data-in="inG" class="req">Gravar</button>
+        </div>
+        <h3>Tempo com encoder ligado x parado</h3>
+        <div class="linha">
+          <label>Voltas<input id="inT" class="curto" type="number" step="1" min="1" value="1"></label>
+          <button data-pre="t" data-in="inT" class="req">Medir</button>
+        </div>
+        <p class="dica">Precisam de homing (fazem se faltar). Na varredura a detecção de travamento fica desligada. Qualquer botão cancela.</p>
+      </div>
+
+      <!-- ================= Y: encoder e rampa (2026-11-15; bobinas do Y no testador acima, botão Y) ================= -->
+      <div class="card">
+        <h2>Encoder e chave do Y <button data-cmd="YS" class="req">Ler chave Y</button></h2>
+        <h3>Monitor do encoder Y</h3>
+        <div class="linha">
+          <button data-cmd="YE" class="req">Liga / desliga</button>
+        </div>
+        <p class="dica">Gire o fuso do Y devagar com a mão: A e B aparecem no registro (11 01 00 10 11). Encoder Y nos GPIO 33/36.</p>
+        <h3>Diagnóstico do encoder Y</h3>
+        <div class="linha">
+          <button data-cmd="YED" class="pri req" data-confirm="O motor do Y vai girar 1 volta para cada lado devagar (8 mm). Área livre? Depois refaça o homing do Y.">Diagnosticar encoder (YED)</button>
+        </div>
+        <div class="resultado" id="encYRes"></div>
+        <p class="dica">Lê A e B direto nos pinos enquanto o motor gira: diz se um canal está morto, se o eixo do encoder treme sem girar (acoplamento patinando) ou se há ruído.</p>
+        <h3>Detecção do Y (governo e encoder sem sinal)</h3>
+        <div class="linha">
+          <button data-cmd="YC" class="req">Ver</button>
+          <button data-cmd="YC0" class="perigo req" data-confirm="Desligar a detecção do Y? Se o Y perder passo ele NÃO baixa a rotação até religar (ou reiniciar a placa).">Desligar</button>
+          <button data-cmd="YC1" class="req">Ligar</button>
+        </div>
+        <p class="dica" id="detYInfo">—</p>
+      </div>
+
+      <div class="card">
+        <h2>Velocidade e rampa do Y</h2>
+        <h3>Varredura (acha a velocidade máxima)</h3>
+        <div class="linha">
+          <label>Até (passos/s)<input id="inYW" class="curto" type="number" step="50" min="500" placeholder="800"></label>
+          <button data-pre="YW" data-in="inYW" class="req">Começar</button>
+        </div>
+        <h3>Curva da rampa (CSV no registro)</h3>
+        <div class="linha">
+          <label>Distância (mm)<input id="inYP" class="curto" type="number" step="5" min="1" placeholder="30"></label>
+          <button data-pre="YP" data-in="inYP" class="req">Gravar</button>
+        </div>
+        <h3>Tempo com encoder ligado x parado</h3>
+        <div class="linha">
+          <label>Voltas<input id="inYTV" class="curto" type="number" step="1" min="1" value="1"></label>
+          <button data-pre="YTV" data-in="inYTV" class="req">Medir</button>
+        </div>
+        <p class="dica">Precisam de homing do Y (fazem se faltar). Na varredura o governo do Y fica desligado. Qualquer botão cancela.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<aside class="lateral">
+  <div class="card">
+    <h2>Registro da serial
+      <span>
+        <button id="btnCopiar" title="Copia o registro">Copiar</button>
+        <button id="btnLimparLog">Limpar</button>
+      </span>
+    </h2>
+    <div id="log"></div>
+    <div class="cmd">
+      <input id="inCmd" placeholder="comando (ex.: x80), ↑ repete" autocomplete="off">
+      <button id="btnEnviar" class="req">Enviar</button>
+    </div>
+  </div>
+</aside>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  let porta = null, escritor = null, leitor = null;
+  let pontos = [];
+  const atual = { x: null, z: null, y: null };  // última posição conhecida (mm), para "usar posição atual"
+  let sentidoX = 1;                     // giro que vai para a chave (+1 = f), lido do 'H'
+  let testeModo = '';                   // teste dos eixos rodando: 'todos', 'um' ou ''
+  let hdApertada = false;               // o HD começou com a chave apertada (andou afastando)
+  let conectadoEm = 0;                  // abrir a porta reinicia a placa: esse reinício é normal
+
+  // ---------- registro ----------
+  const log = $('log');
+  function registrar(txt, cls) {
+    const fim = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
+    const d = document.createElement('div');
+    if (cls) d.className = cls;
+    d.textContent = txt;
+    log.appendChild(d);
+    while (log.childNodes.length > 1500) log.removeChild(log.firstChild);
+    if (fim) log.scrollTop = log.scrollHeight;
+  }
+  $('btnLimparLog').onclick = () => { log.textContent = ''; };
+  $('btnCopiar').onclick = () => {
+    const t = Array.from(log.childNodes).map((n) => n.textContent).join('\n');
+    if (navigator.clipboard) navigator.clipboard.writeText(t);
+  };
+
+  function habilitar(on) {
+    document.querySelectorAll('.req').forEach((b) => { b.disabled = !on; });
+  }
+  habilitar(false);
+
+  // ---------- abas (lembra a última) ----------
+  function abrirAba(nome) {
+    document.querySelectorAll('.aba').forEach((b) => b.classList.toggle('sel', b.dataset.aba === nome));
+    document.querySelectorAll('.painel').forEach((p) => p.classList.toggle('sel', p.id === 'aba-' + nome));
+    try { localStorage.setItem('aba', nome); } catch (e) {}
+    if (nome === 'operar') requestAnimationFrame(() => vivoDesenhar());  // canvas escondido não tem tamanho
+    if (nome === 'operar') requestAnimationFrame(() => yDesenhar());
+  }
+  document.querySelectorAll('.aba').forEach((b) => { b.onclick = () => abrirAba(b.dataset.aba); });
+  try { const a = localStorage.getItem('aba'); if (a && $('aba-' + a)) abrirAba(a); } catch (e) {}
+
+  // ---------- serial ----------
+  async function conectar() {
+    if (!('serial' in navigator)) {
+      alert('Este navegador não tem Web Serial. Abra no Chrome ou no Edge.');
+      return;
+    }
+    try {
+      porta = await navigator.serial.requestPort();
+      await porta.open({ baudRate: 115200 });
+    } catch (e) {
+      registrar('nao abriu a porta: ' + e.message + ' (o Serial Monitor do VS Code esta aberto? feche-o)', 'err');
+      porta = null;
+      return;
+    }
+    conectadoEm = Date.now();
+    escritor = porta.writable.getWriter();
+    $('ponto').classList.add('on');
+    $('btnConectar').textContent = 'Desconectar';
+    $('btnConectar').classList.remove('pri');
+    habilitar(true);
+    registrar('conectado', 'sis');
+    lerSempre();
+    // Lê o estado da placa: programa, chaves e velocidades.
+    setTimeout(() => enviar('S'), 500);
+    setTimeout(() => enviar('s'), 800);
+    setTimeout(() => enviar('v'), 1100);
+    setTimeout(() => enviar('Z'), 1400);
+    setTimeout(() => enviar('H'), 1700);   // ajustes do homing X (sentido, velocidades)
+    setTimeout(() => enviar('C'), 2000);   // detecção de travamento ligada / desligada
+    setTimeout(() => enviar('G'), 2300);   // controle de rotação (quedas, fatores, tempo)
+    setTimeout(() => enviar('Y'), 2600);   // eixo Y: estado, setpoint e governo
+  }
+
+  async function desconectar() {
+    try { if (leitor) await leitor.cancel(); } catch (e) {}
+    try { if (escritor) escritor.releaseLock(); } catch (e) {}
+    try { if (porta) await porta.close(); } catch (e) {}
+    porta = escritor = leitor = null;
+    $('ponto').classList.remove('on');
+    $('btnConectar').textContent = 'Conectar USB';
+    $('btnConectar').classList.add('pri');
+    habilitar(false);
+    registrar('desconectado', 'sis');
+  }
+
+  async function lerSempre() {
+    const dec = new TextDecoder();
+    let resto = '';
+    while (porta && porta.readable) {
+      leitor = porta.readable.getReader();
+      try {
+        for (;;) {
+          const { value, done } = await leitor.read();
+          if (done) break;
+          resto += dec.decode(value, { stream: true });
+          let i;
+          while ((i = resto.search(/\r?\n/)) >= 0) {
+            const linha = resto.slice(0, i);
+            resto = resto.slice(resto[i] === '\r' ? i + 2 : i + 1);
+            // Erro ao tratar UMA linha não pode parar a leitura (senão nada mais atualiza).
+            try {
+              tratarLinha(linha);
+            } catch (e) {
+              registrar('erro no painel ao ler "' + linha.slice(0, 60) + '": ' + e.message, 'err');
+            }
+          }
+        }
+      } catch (e) {
+        registrar('erro de leitura: ' + e.message, 'err');
+        // Framing/parity/break/overrun (ex.: bytes do boot da placa) não são fatais:
+        // o Web Serial troca o 'readable' e a leitura continua no próximo giro.
+        if (/framing|parity|break|overrun/i.test(e.message)) continue;
+        break;
+      } finally {
+        leitor.releaseLock();
+      }
+    }
+  }
+
+  async function enviar(cmd) {
+    if (!escritor) return;
+    registrar('> ' + cmd, 'env');
+    await escritor.write(new TextEncoder().encode(cmd + '\r\n'));  // comandos são por linha
+  }
+
+  // ---------- estado na tela ----------
+  function chip(id, classe) {
+    const c = $(id);
+    c.classList.remove('ok', 'aviso', 'on');
+    if (classe) c.classList.add(classe);
+  }
+  function tag(id, txt, classe) {
+    const t = $(id);
+    t.textContent = txt;
+    t.className = 'tag' + (classe ? ' ' + classe : '');
+  }
+  // X (mm) e leitura crua do encoder (contagens): a posição é só o encoder.
+  function mostrarEncoder(cont, semSinal) {
+    $('xEnc').textContent = cont + ' cont' + (semSinal ? ' · SEM SINAL' : '');
+    chip('chipEnc', semSinal ? 'on' : 'ok');
+  }
+  function mostrarX(mm) {
+    atual.x = parseFloat(mm);
+    $('xMotor').textContent = mm + ' mm';
+    chip('chipX', 'ok');
+    tag('tagX', 'X ' + mm + ' mm', 'ok');
+  }
+  // Sem homing: mostra a posição relativa (zero do encoder ao ligar), em amarelo.
+  function semRefX(mmRelativo) {
+    atual.x = null;
+    $('xMotor').textContent = mmRelativo !== undefined ? mmRelativo + ' mm (sem homing)' : 'sem homing';
+    chip('chipX', 'aviso');
+    tag('tagX', 'sem homing', 'aviso');
+  }
+  // Indicador de que a placa está mandando a posição ("@T" chega 4 a 10 vezes por segundo).
+  let ultimoDado = 0;
+  function dadosChegaram() {
+    ultimoDado = Date.now();
+    $('dadosEstado').textContent = 'chegando';
+    chip('chipDados', 'ok');
+  }
+  setInterval(() => {
+    if (!porta) {
+      $('dadosEstado').textContent = 'desconectado';
+      chip('chipDados', '');
+    } else if (Date.now() - ultimoDado > 1500) {
+      $('dadosEstado').textContent = ultimoDado ? 'PAROU de chegar' : 'nenhum (grave o firmware novo)';
+      chip('chipDados', 'on');
+    }
+  }, 500);
+  function mostrarZ(mm) {
+    atual.z = parseFloat(mm);
+    $('zPos').textContent = mm + ' mm';
+    chip('chipZ', 'ok');
+    tag('tagZ', 'Z ' + mm + ' mm', 'ok');
+  }
+  function semRefZ() {
+    atual.z = null;
+    $('zPos').textContent = 'sem referência';
+    chip('chipZ', 'aviso');
+    tag('tagZ', 'sem referência', 'aviso');
+  }
+  function chave(eixo, apertada) {
+    $('ch' + eixo).textContent = apertada ? 'APERTADA' : 'solta';
+    chip('chipCh' + eixo, apertada ? 'on' : null);
+    if (eixo === 'X') {
+      $('diagChave').textContent = apertada ? 'APERTADA' : 'solta';
+      $('diagChave').style.color = apertada ? 'var(--alarme)' : '';
+    }
+  }
+  function resultado(id, txt, classe) {
+    const r = $(id);
+    r.textContent = txt;
+    r.className = 'resultado' + (classe ? ' ' + classe : '');
+  }
+  function protecao(ligada) {
+    $('prot').textContent = ligada ? 'ligada' : 'DESLIGADA';
+    chip('chipProt', ligada ? 'ok' : 'aviso');
+  }
+  // Travadas do X (sem alarme): conta e pinta o chip. Desistiu = vermelho.
+  let travas = 0;
+  function travou(desistiu) {
+    travas++;
+    $('travas').textContent = travas;
+    chip('chipTrava', desistiu ? 'on' : 'aviso');
+  }
+  function travasZerar() {
+    travas = 0;
+    $('travas').textContent = '0';
+    chip('chipTrava', 'ok');
+  }
+  function irDiagnostico() {
+    abrirAba('operar');
+    $('cardDiag').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+  function passoCal(eixo, n) {  // qual passo da calibração está ativo (1 ou 2)
+    $('p' + eixo + '1').classList.toggle('ativo', n === 1);
+    $('p' + eixo + '2').classList.toggle('ativo', n === 2);
+  }
+
+  // ---------- movimento ao vivo (linhas "@T" do ESP32) ----------
+  // @T <ms> <X mm (encoder)> <encoder cont> <vx> <vx mm/s> <limite> <Z> <vz> <vz mm/s> <refX><refZ> <real> <setpoint>
+  const VIVO_JANELA_MS = 30000;
+  let vivo = [];          // amostras {t, x, cont, vx, vxmm, lim, z, vz, vzmm, rx, rz, real, sp}
+  let vivoTravas = [];    // instantes (ms da placa) em que travou
+  let vivoPendente = false;
+  function cor(nome) { return getComputedStyle(document.documentElement).getPropertyValue(nome).trim(); }
+  function vivoCores() {
+    return { x: cor('--pri'), z: cor('--aviso'), lim: cor('--alarme'),
+             real: cor('--ok'), sp: cor('--txt'), grade: cor('--borda'), txt: cor('--sub') };
+  }
+  function vivoLegenda() {
+    const c = vivoCores();
+    $('lgX').style.background = $('lgVx').style.background = c.x;
+    $('lgZ').style.background = $('lgVz').style.background = c.z;
+    // Alvos: tracejados (a legenda mostra a cor; o gráfico, o traço).
+    $('lgAx').style.background = `repeating-linear-gradient(90deg, ${c.x} 0 4px, transparent 4px 7px)`;
+    $('lgAz').style.background = `repeating-linear-gradient(90deg, ${c.z} 0 4px, transparent 4px 7px)`;
+    $('lgSp').style.background = c.sp;
+    $('lgReal').style.background = c.real;
+    $('lgTrava').style.background = c.lim;
+  }
+  function vivoLimpar() {
+    vivo = [];
+    vivoTravas = [];
+    vivoDesenhar();
+  }
+  function telemetria(l) {
+    const p = l.trim().split(/\s+/);
+    if (p.length < 11) return;
+    const s = { t: +p[1], x: +p[2], cont: +p[3], vx: +p[4], vxmm: +p[5], lim: +p[6],
+                z: +p[7], vz: +p[8], vzmm: +p[9], rx: p[10][0] === '1', rz: p[10][1] === '1',
+                real: p.length > 11 ? +p[11] : NaN, sp: p.length > 12 ? +p[12] : NaN,
+                temSp: p.length > 12 };
+    // Alvos: <alvo X mm> <alvo X cont> <m/c/f> <alvo Z mm>; "-" = sem alvo.
+    const num = (i) => (p.length > i && p[i] !== '-' ? +p[i] : NaN);
+    s.ax = num(13);
+    s.acont = num(14);
+    s.aest = p.length > 15 ? p[15] : '-';
+    s.az = num(16);
+    s.temAx = s.rx && !isNaN(s.ax);
+    s.temAz = s.rz && !isNaN(s.az);
+    const mmS = (v) => (v / 256).toFixed(2) + ' mm/s';  // 256 passos/mm (nominal)
+    if (vivo.length && s.t < vivo[vivo.length - 1].t) vivoLimpar();  // placa reiniciou
+    vivo.push(s);
+    while (vivo.length && vivo[0].t < s.t - VIVO_JANELA_MS) vivo.shift();
+    while (vivoTravas.length && vivoTravas[0] < s.t - VIVO_JANELA_MS) vivoTravas.shift();
+    $('vX').textContent = s.x.toFixed(2) + ' mm' + (s.rx ? '' : ' (relativo)');
+    $('vXm').textContent = s.cont + ' cont';
+    // Encoder sem sinal: o motor andou 5 mm e o encoder não mudou nada.
+    s.semSinal = p.length > 17 && p[17] === 'SEMSINAL';
+    mostrarEncoder(s.cont, s.semSinal);
+    if (s.rx) mostrarX(s.x.toFixed(2)); else semRefX(s.x.toFixed(2));
+    dadosChegaram();
+    // Posição atual x alvo (tudo pelo encoder).
+    $('pAtual').textContent = s.x.toFixed(2) + ' mm';
+    $('pAtualCont').textContent = s.semSinal ? `ENCODER SEM SINAL (${s.cont} cont): confira cabo, 3V3 e acoplamento`
+                                             : `encoder ${s.cont} cont`;
+    $('pAtualCont').style.color = s.semSinal ? 'var(--alarme)' : '';
+    const estados = { m: 'indo para o alvo', c: 'chegou', f: 'ficou fora da tolerância' };
+    if (!isNaN(s.acont)) {
+      const faltaCont = s.acont - s.cont;
+      $('pAlvo').textContent = s.rx ? s.ax.toFixed(2) + ' mm' : s.acont + ' cont';
+      $('pAlvoCont').textContent = `encoder ${s.acont} cont`;
+      $('pFalta').textContent = s.rx ? (s.ax - s.x >= 0 ? '+' : '') + (s.ax - s.x).toFixed(2) + ' mm'
+                                     : (faltaCont >= 0 ? '+' : '') + faltaCont + ' cont';
+      $('pEstado').textContent = `${faltaCont >= 0 ? '+' : ''}${faltaCont} cont · ${estados[s.aest] || s.aest}`;
+      $('xAlvo').textContent = s.rx ? s.ax.toFixed(2) + ' mm' : s.acont + ' cont';
+      chip('chipAlvo', s.aest === 'c' ? 'ok' : 'aviso');
+    } else {
+      $('pAlvo').textContent = '—';
+      $('pAlvoCont').textContent = 'sem alvo';
+      $('pFalta').textContent = '—';
+      $('pEstado').textContent = '—';
+      $('xAlvo').textContent = '—';
+      chip('chipAlvo', '');
+    }
+    $('pZ').textContent = s.rz ? s.z.toFixed(2) + ' mm' : 'sem ref';
+    $('pZAlvo').textContent = s.temAz ? 'alvo ' + s.az.toFixed(2) + ' mm' : 'sem alvo';
+    $('vVx').textContent = `${s.vx} p/s · ${s.vxmm.toFixed(2)} mm/s`;
+    $('vLim').textContent = s.lim + ' p/s' + (s.sp > 0 && s.lim < s.sp ? ' (reduzida)' : '');
+    if (!isNaN(s.sp)) $('vSp').textContent = mmS(s.sp);
+    if (!isNaN(s.real)) $('vReal').textContent = mmS(s.real);
+    $('vZ').textContent = s.rz ? s.z.toFixed(2) + ' mm' : 'sem ref';
+    $('vVz').textContent = `${s.vz} p/s · ${s.vzmm.toFixed(2)} mm/s`;
+    const andando = s.vx > 0 || s.vz > 0;
+    tag('tagVivo', andando ? 'andando' : 'parado', andando ? 'aviso' : '');
+    if (!vivoPendente) {
+      vivoPendente = true;
+      requestAnimationFrame(() => { vivoPendente = false; vivoDesenhar(); });
+    }
+  }
+  // Desenha séries [{chave, cor, tracejado}] no canvas, eixo Y de 'ymin' a 'ymax'.
+  function vivoGrafico(cv, series, ymin, ymax, unidade, marcas) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = cv.clientWidth, h = cv.clientHeight;
+    if (!w || !h) return;
+    if (cv.width !== Math.round(w * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+    const g = cv.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    const c = vivoCores();
+    const esq = 44, dir = 8, cima = 8, baixo = 18;
+    const fim = vivo.length ? vivo[vivo.length - 1].t : 0;
+    const ini = fim - VIVO_JANELA_MS;
+    const px = (t) => esq + ((t - ini) / VIVO_JANELA_MS) * (w - esq - dir);
+    const py = (v) => cima + (1 - (v - ymin) / (ymax - ymin || 1)) * (h - cima - baixo);
+    g.font = '11px system-ui, sans-serif';
+    g.fillStyle = c.txt;
+    g.strokeStyle = c.grade;
+    g.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {  // grade horizontal + valores
+      const v = ymin + ((ymax - ymin) * i) / 4;
+      const y = Math.round(py(v)) + 0.5;
+      g.beginPath(); g.moveTo(esq, y); g.lineTo(w - dir, y); g.stroke();
+      g.fillText(Math.round(v) + (i === 4 ? ' ' + unidade : ''), 2, y + 4);
+    }
+    for (let s = 0; s <= 30; s += 10) g.fillText(s === 0 ? 'agora' : `-${s} s`, px(fim - s * 1000) - (s ? 14 : 30), h - 4);
+    g.strokeStyle = c.lim;
+    for (const t of marcas || []) {  // travadas
+      const x = Math.round(px(t)) + 0.5;
+      g.beginPath(); g.moveTo(x, cima); g.lineTo(x, h - baixo); g.stroke();
+    }
+    for (const se of series) {
+      g.strokeStyle = se.cor;
+      g.lineWidth = 2;
+      g.setLineDash(se.tracejado ? [5, 4] : []);
+      g.beginPath();
+      let primeiro = true;
+      for (const a of vivo) {
+        if (se.so && !a[se.so]) { primeiro = true; continue; }
+        const x = px(a.t), y = py(Math.max(ymin, Math.min(ymax, a[se.chave])));
+        if (primeiro) { g.moveTo(x, y); primeiro = false; } else g.lineTo(x, y);
+      }
+      g.stroke();
+    }
+    g.setLineDash([]);
+  }
+  function vivoDesenhar() {
+    const c = vivoCores();
+    vivoGrafico($('grafPos'), [
+      { chave: 'ax', cor: c.x, tracejado: true, so: 'temAx' },
+      { chave: 'az', cor: c.z, tracejado: true, so: 'temAz' },
+      { chave: 'x', cor: c.x },  // sempre: sem homing é relativo ao zero do encoder
+      { chave: 'z', cor: c.z, so: 'rz' },
+    ], 0, 240, 'mm');
+    vivoGrafico($('grafVel'), [
+      { chave: 'sp', cor: c.sp, tracejado: true, so: 'temSp' },
+      { chave: 'vx', cor: c.x },
+      { chave: 'real', cor: c.real, so: 'temSp' },
+      { chave: 'vz', cor: c.z },
+    ], 0, 520, 'p/s', vivoTravas);
+  }
+  window.addEventListener('resize', vivoDesenhar);
+  if (window.matchMedia) {
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { vivoLegenda(); vivoDesenhar(); });
+  }
+
+  // ---------- eixo Y (linhas "@Y" do ESP32, 2026-11-15) ----------
+  // @Y <ms> <Y mm> <encoder cont> <vy> <vy mm/s> <rotação permitida> <ref> <real> <setpoint>
+  //    <alvo mm> <alvo cont> <m/c/f/-> <ok/SEMSINAL>
+  let vivoY = [];          // amostras {t, y, cont, vy, lim, ref, real, sp, ay, temAy}
+  let vivoYQuedas = [];    // instantes em que a rotação do Y caiu
+  let vivoYPendente = false;
+  function yLegenda() {
+    const c = vivoCores();
+    $('lgY').style.background = $('lgYm').style.background = c.x;
+    $('lgYa').style.background = `repeating-linear-gradient(90deg, ${c.x} 0 4px, transparent 4px 7px)`;
+    $('lgYsp').style.background = c.sp;
+    $('lgYr').style.background = c.real;
+  }
+  function yLimpar() {
+    vivoY = [];
+    vivoYQuedas = [];
+    yDesenhar();
+  }
+  function telemetriaY(l) {
+    const p = l.trim().split(/\s+/);
+    if (p.length < 10) return;
+    const num = (i) => (p.length > i && p[i] !== '-' ? +p[i] : NaN);
+    const s = { t: +p[1], y: +p[2], cont: +p[3], vy: +p[4], vymm: +p[5], lim: +p[6],
+                ref: p[7] === '1', real: num(8), sp: num(9), ay: num(10), acont: num(11),
+                aest: p.length > 12 ? p[12] : '-', semSinal: p.length > 13 && p[13] === 'SEMSINAL' };
+    s.temAy = s.ref && !isNaN(s.ay);
+    if (vivoY.length && s.t < vivoY[vivoY.length - 1].t) yLimpar();  // placa reiniciou
+    vivoY.push(s);
+    while (vivoY.length && vivoY[0].t < s.t - VIVO_JANELA_MS) vivoY.shift();
+    while (vivoYQuedas.length && vivoYQuedas[0] < s.t - VIVO_JANELA_MS) vivoYQuedas.shift();
+    const mmS = (v) => (v / 256).toFixed(2) + ' mm/s';  // 256 passos/mm (nominal)
+    $('yAtual').textContent = s.y.toFixed(2) + ' mm';
+    $('yAtualCont').textContent = s.semSinal ? `ENCODER Y SEM SINAL (${s.cont} cont): confira cabo, 3V3 e acoplamento`
+                                             : `encoder ${s.cont} cont${s.ref ? '' : ' · sem homing (relativo)'}`;
+    $('yAtualCont').style.color = s.semSinal ? 'var(--alarme)' : '';
+    $('yTopo').textContent = s.y.toFixed(2) + ' mm' + (s.ref ? '' : ' (sem homing)') + (s.semSinal ? ' · SEM SINAL' : '');
+    chip('chipY', s.semSinal ? 'on' : (s.ref ? 'ok' : 'aviso'));
+    tag('tagY', s.ref ? 'Y ' + s.y.toFixed(2) + ' mm' : 'sem homing', s.ref ? 'ok' : 'aviso');
+    atual.y = s.ref && !s.semSinal ? s.y : null;  // para "Usar posição atual" do programa
+    const estados = { m: 'indo para o alvo', c: 'chegou', f: 'ficou fora da tolerância' };
+    if (!isNaN(s.acont)) {
+      const falta = s.acont - s.cont;
+      $('yAlvo').textContent = s.ref ? s.ay.toFixed(2) + ' mm' : s.acont + ' cont';
+      $('yAlvoCont').textContent = `encoder ${s.acont} cont`;
+      $('yFalta').textContent = s.ref ? (s.ay - s.y >= 0 ? '+' : '') + (s.ay - s.y).toFixed(2) + ' mm'
+                                      : (falta >= 0 ? '+' : '') + falta + ' cont';
+      $('yEstado').textContent = `${falta >= 0 ? '+' : ''}${falta} cont · ${estados[s.aest] || s.aest}`;
+    } else {
+      $('yAlvo').textContent = '—';
+      $('yAlvoCont').textContent = 'sem alvo';
+      $('yFalta').textContent = '—';
+      $('yEstado').textContent = '—';
+    }
+    $('yVel').textContent = `${s.vymm.toFixed(2)} mm/s`;
+    $('yVelInfo').textContent = `motor ${s.vy} p/s · real ${isNaN(s.real) ? '—' : mmS(s.real)} · setpoint ` +
+      `${isNaN(s.sp) ? '—' : mmS(s.sp)}${!isNaN(s.sp) && s.lim < s.sp ? ' · rotação reduzida' : ''}`;
+    if (!vivoYPendente) {
+      vivoYPendente = true;
+      requestAnimationFrame(() => { vivoYPendente = false; yDesenhar(); });
+    }
+  }
+  // Gráfico do Y: mesmo desenho do "Movimento ao vivo", com os dados do Y.
+  function yGrafico(cv, series, ymin, ymax, unidade, marcas) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = cv.clientWidth, h = cv.clientHeight;
+    if (!w || !h) return;
+    if (cv.width !== Math.round(w * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+    const g = cv.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    const c = vivoCores();
+    const esq = 44, dir = 8, cima = 8, baixo = 18;
+    const fim = vivoY.length ? vivoY[vivoY.length - 1].t : 0;
+    const ini = fim - VIVO_JANELA_MS;
+    const px = (t) => esq + ((t - ini) / VIVO_JANELA_MS) * (w - esq - dir);
+    const py = (v) => cima + (1 - (v - ymin) / (ymax - ymin || 1)) * (h - cima - baixo);
+    g.font = '11px system-ui, sans-serif';
+    g.fillStyle = c.txt;
+    g.strokeStyle = c.grade;
+    g.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const v = ymin + ((ymax - ymin) * i) / 4;
+      const y = Math.round(py(v)) + 0.5;
+      g.beginPath(); g.moveTo(esq, y); g.lineTo(w - dir, y); g.stroke();
+      g.fillText(Math.round(v) + (i === 4 ? ' ' + unidade : ''), 2, y + 4);
+    }
+    for (let s = 0; s <= 30; s += 10) g.fillText(s === 0 ? 'agora' : `-${s} s`, px(fim - s * 1000) - (s ? 14 : 30), h - 4);
+    g.strokeStyle = c.lim;
+    for (const t of marcas || []) {
+      const x = Math.round(px(t)) + 0.5;
+      g.beginPath(); g.moveTo(x, cima); g.lineTo(x, h - baixo); g.stroke();
+    }
+    for (const se of series) {
+      g.strokeStyle = se.cor;
+      g.lineWidth = 2;
+      g.setLineDash(se.tracejado ? [5, 4] : []);
+      g.beginPath();
+      let primeiro = true;
+      for (const a of vivoY) {
+        if ((se.so && !a[se.so]) || isNaN(a[se.chave])) { primeiro = true; continue; }
+        const x = px(a.t), y = py(Math.max(ymin, Math.min(ymax, a[se.chave])));
+        if (primeiro) { g.moveTo(x, y); primeiro = false; } else g.lineTo(x, y);
+      }
+      g.stroke();
+    }
+    g.setLineDash([]);
+  }
+  function yDesenhar() {
+    const c = vivoCores();
+    yGrafico($('grafY'), [
+      { chave: 'ay', cor: c.x, tracejado: true, so: 'temAy' },
+      { chave: 'y', cor: c.x },
+    ], 0, 200, 'mm');
+    yGrafico($('grafYv'), [
+      { chave: 'sp', cor: c.sp, tracejado: true },
+      { chave: 'vy', cor: c.x },
+      { chave: 'real', cor: c.real },
+    ], 0, 520, 'p/s', vivoYQuedas);
+  }
+  window.addEventListener('resize', yDesenhar);
+  // Respostas do Y que não são "@Y" (estado, setpoint, governo, quedas).
+  function tratarLinhaY(l) {
+    if (/^\[vel Y\] CAIU/.test(l) && vivoY.length) {
+      vivoYQuedas.push(vivoY[vivoY.length - 1].t);
+      yDesenhar();
+    }
+    let m = l.match(/(?:^|-- )encoder Y: (-?\d+) cont/);
+    if (m) {
+      const my = l.match(/\bY: (-?[\d.]+) mm/);
+      if (my) {
+        $('yTopo').textContent = my[1] + ' mm';
+        tag('tagY', 'Y ' + my[1] + ' mm', 'ok');
+      }
+    }
+    m = l.match(/^setpoint Y: ([\d.]+) mm\/s/);
+    if (m) $('inYV').value = m[1];
+    m = l.match(/^governo Y: quedas para reduzir (\d+), fator de aceleracao (\d+)%, fator de desaceleracao (\d+)%, mantem (\d+) ms/);
+    if (m) {
+      $('inYGQ').value = m[1];
+      $('inYGA').value = m[2];
+      $('inYGD').value = m[3];
+      $('inYGS').value = m[4];
+    }
+    m = l.match(/^eixo Y: curso ([\d.]+) a ([\d.]+) mm/);
+    if (m) { $('inYir').min = m[1]; $('inYir').max = m[2]; }
+
+    // Chave do Y (chip do topo e diagnóstico).
+    m = l.match(/^chave Y: (ACIONADA|solta)/) || l.match(/^\[sensor\] homing Y (APERTADO|solto)/) ||
+        l.match(/^\[homing Y\] SENSOR (APERTADO|solto)/);
+    if (m) {
+      const ap = m[1] !== 'solta' && m[1] !== 'solto';
+      $('chY').textContent = ap ? 'APERTADA' : 'solta';
+      chip('chipChY', ap ? 'on' : null);
+      $('diagChaveY').textContent = ap ? 'APERTADA' : 'solta';
+      $('diagChaveY').style.color = ap ? 'var(--alarme)' : '';
+    }
+    // Homing do Y: fase, resultado e ajustes.
+    m = l.match(/^\[homing Y\] estado: (.+?), girando '(.)'/);
+    if (m) {
+      $('homFaseY').textContent = m[2] === '-' ? m[1] : `${m[1]} (girando ${m[2]})`;
+      tag('tagHomY', 'em andamento', 'aviso');
+    }
+    if (/^-- homing do Y/.test(l)) resultado('homResY', '');
+    if (/^homing Y ok em/.test(l)) {
+      $('homFaseY').textContent = 'ok';
+      tag('tagHomY', 'ok', 'ok');
+      resultado('homResY', l, 'ok');
+    }
+    m = l.match(/^homing Y FALHOU \((.+?)\) na fase '(.+?)'/);
+    if (m) {
+      $('homFaseY').textContent = 'falhou em ' + m[2];
+      tag('tagHomY', 'falhou', 'aviso');
+      tag('tagY', 'sem homing', 'aviso');
+      resultado('homResY', `Falhou na fase "${m[2]}": ${m[1]}.`, 'ruim');
+    }
+    if (/^   (Y andou o curso todo|a chave Y nao soltou)/.test(l)) {
+      resultado('homResY', $('homResY').textContent + ' ' + l.trim(), 'ruim');
+    }
+    m = l.match(/^homing Y: sentido ([+-]\d) .*rapida (\d+) passos\/s, lenta (\d+) passos\/s, travamento (\d+) passos/);
+    if (m) {
+      $('inYHS').value = String(+m[1]);
+      $('inYHV').value = m[2];
+      $('inYHL').value = m[3];
+      $('inYHT').value = m[4];
+    }
+    // Diagnóstico YHD.
+    if (/^-- diagnostico do homing Y/.test(l)) resultado('hdResY', 'andando 2 mm… olhe o carro do Y');
+    m = l.match(/^   encoder Y: ([+-]?\d+) contagens \(esperado ~([+-]?\d+)\): (.+)$/);
+    if (m) resultado('hdResY', `Encoder Y: ${m[1]} contagens (esperado ~${m[2]}): ${m[3]}`, /^ok$/.test(m[3]) ? 'ok' : 'ruim');
+    if (/^   a chave Y ACIONOU no caminho/.test(l)) resultado('hdResY', $('hdResY').textContent + ' · a chave acionou no caminho (sentido certo)', 'ok');
+    if (/^-- diagnostico do Y cancelado/.test(l)) resultado('hdResY', 'cancelado');
+    // Rampa / velocidade do Y.
+    m = l.match(/^rampa Y: partida (\d+) passos\/s, maxima (\d+) passos\/s \(([\d.]+) mm\/s\), aceleracao (\d+)/);
+    if (m) {
+      $('inYPart').value = m[1];
+      $('inYVel').value = m[3];
+      $('inYAcel').value = m[4];
+    }
+    // Calibração do Y.
+    if (/^>> MECA o deslocamento real do Y/.test(l)) {
+      passoCal('Y', 2);
+      tag('tagCalY', 'meça e envie', 'aviso');
+      $('inYMed').focus();
+    }
+    if (/^Y contagens\/mm: .* Salvo/.test(l)) { passoCal('Y', 1); tag('tagCalY', 'salva', 'ok'); }
+    if (/calibracao de distancia do Y cancelada/.test(l)) { passoCal('Y', 1); tag('tagCalY', 'cancelada'); }
+    m = l.match(/^calibracao Y: (.+)$/);
+    if (m) $('calYInfo').textContent = m[1];
+    // Detecção do Y.
+    m = l.match(/^deteccao Y: (.+)$/);
+    if (m) $('detYInfo').textContent = m[1];
+    // Diagnóstico do encoder Y (YED).
+    if (/^-- diagnostico do encoder Y:/.test(l)) resultado('encYRes', 'girando devagar 1 volta para cada lado… olhe o fuso');
+    if (/^-- diagnostico do encoder Y cancelado/.test(l)) resultado('encYRes', 'cancelado');
+    m = l.match(/^== diagnostico do encoder Y: f -> (.+?) \| b -> (.+?) ==$/);
+    if (m) {
+      resultado('encYRes', `Rumo à chave (f): ${m[1]}. Afastando (b): ${m[2]}.`,
+                m[1] === 'ok' && m[2] === 'ok' ? 'ok' : 'ruim');
+    }
+    // Bobinas do Y: "ligado Y:" vai para o testador compartilhado (X / Z / Y).
+    // O YI0 (fim pelo comando do Y) também apaga os LEDs se o testador está no Y.
+    if (/^-- bobinas do Y: fim do teste/.test(l) && motorTeste === 'Y') acender('');
+    // Teste do Y no quadro "Teste dos eixos" (sozinho com EY / YT, ou dentro do E).
+    if (/^== teste do Y: pontos/.test(l) && !testeModo) {
+      testeModo = 'um';
+      $('testeLista').innerHTML = '';
+      resultado('testeRes', '');
+      tag('tagTeste', 'rodando', 'aviso');
+    }
+    if (/^\[teste Y\]/.test(l)) {
+      const li = document.createElement('li');
+      li.textContent = l.replace(/^\[teste Y\] /, 'Y: ');
+      if (/NAO CHEGOU|FORA/.test(l)) li.style.color = 'var(--alarme)';
+      $('testeLista').appendChild(li);
+    }
+    m = l.match(/^== teste do Y: (OK|FALHOU|CANCELADO)(.*?) ==$/);
+    if (m) {
+      const li = document.createElement('li');
+      li.textContent = `Teste do Y: ${m[1]}${m[2]}`;
+      $('testeLista').appendChild(li);
+      if (testeModo !== 'todos') {
+        resultado('testeRes', `Teste do Y: ${m[1]}${m[2]}`, m[1] === 'OK' ? 'ok' : 'ruim');
+        tag('tagTeste', m[1].toLowerCase(), m[1] === 'OK' ? 'ok' : 'aviso');
+        testeModo = '';
+      }
+    }
+  }
+
+  // ---------- respostas do ESP32 ----------
+  function tratarLinha(l) {
+    // Eixo Y: telemetria "@Y" vai para os gráficos do Y; o resto também passa pelo X/Z.
+    if (l.startsWith('@Y ')) { telemetriaY(l); return; }
+    tratarLinhaY(l);
+    // Telemetria: vai para os gráficos, não para o registro (10 linhas por segundo).
+    if (l.startsWith('@T ')) { telemetria(l); return; }
+    if (/^\[trava X\] encoder parado .*rotacao baixa|^\[vel X\] CAIU/.test(l) && vivo.length) {
+      vivoTravas.push(vivo[vivo.length - 1].t);
+      vivoDesenhar();
+    }
+    registrar(l, /TRAVOU|FALHOU|invalid|NAO aplicado|NAO CHEGOU|SEM SINAL/.test(l) ? 'err' : '');
+    let m;
+
+    // Programa: cabeçalho e pontos.
+    m = l.match(/^programa X \(centro do braco, ([\d.]+) a ([\d.]+) mm\) Z \(topo 0 a ([\d.]+) mm\): (\d+) ponto/);
+    if (m) {
+      pontos = [];
+      $('inX').min = $('inXir').min = m[1];
+      $('inX').max = $('inXir').max = m[2];
+      $('inZ').max = $('inZir').max = m[3];
+      const ly = l.match(/Y de ([\d.]+) a ([\d.]+) mm/);  // eixo Y
+      if (ly) { $('inY').min = ly[1]; $('inY').max = ly[2]; }
+      desenharTabela();
+      return;
+    }
+    m = l.match(/^\s*(\d+): X\s+(-?[\d.]+) mm\s+Z\s+(-?[\d.]+) mm\s+(.+?)\s+espera (\d+) ms/);
+    if (m) {
+      const my = l.match(/espera \d+ ms\s+Y\s+(-?[\d.]+)\s*mm/);  // eixo Y no fim da linha (ou "Y -")
+      pontos.push({ n: +m[1], x: m[2], z: m[3], vel: m[4].replace('padrao', 'padrão'), espera: m[5], y: my ? my[1] : '—' });
+      desenharTabela();
+      return;
+    }
+
+    // Posição do X: SÓ o encoder. Linha de estado:
+    //   "encoder X: 903 cont (erros 0)   X: 120.35 mm   Z: ..."  (ou "X: sem homing")
+    // Também vem depois de "-- parou ... -- " ou "-- Z parou -- " (sem âncora no começo).
+    m = l.match(/(?:^|-- )encoder X: (-?\d+) cont/);
+    if (m) {
+      mostrarEncoder(m[1], /SEM SINAL/.test(l));
+      const mx = l.match(/\bX: (-?[\d.]+) mm/);
+      if (mx) mostrarX(mx[1]); else semRefX();
+    }
+    m = l.match(/^\[seq\] chegou: X (-?[\d.]+) mm \(encoder (-?\d+) cont\)/);
+    if (m) { mostrarX(m[1]); mostrarEncoder(m[2]); }
+
+    // Homing geral e teste dos eixos (HA, E, EX, EZ).
+    m = l.match(/^== homing geral: (OK|FALHOU)/);
+    if (m) tag('tagHA', m[1] === 'OK' ? 'homing ok' : 'homing falhou', m[1] === 'OK' ? 'ok' : 'aviso');
+    if (/^== homing de todos os eixos/.test(l)) tag('tagHA', 'homing...', 'aviso');
+    // Começo: "todos" engloba os testes do X e do Z (só termina no resumo final).
+    m = l.match(/^== teste (de todos os eixos \(|do X: pontos|do Z: pontos)/);
+    if (m && !testeModo) {
+      testeModo = m[1].startsWith('de todos') ? 'todos' : 'um';
+      $('testeLista').innerHTML = '';
+      resultado('testeRes', '');
+      tag('tagTeste', 'rodando', 'aviso');
+    }
+    if (/^\[teste( [XZ])?\]/.test(l)) {
+      const li = document.createElement('li');
+      li.textContent = l.replace(/^\[teste ?([XZ]?)\] /, (s, e) => (e ? e + ': ' : ''));
+      if (/NAO CHEGOU|FORA/.test(l)) li.style.color = 'var(--alarme)';
+      $('testeLista').appendChild(li);
+    }
+    m = l.match(/^== teste (de todos os eixos|do X|do Z): (OK|FALHOU|CANCELADO)(.*?) ==$/);
+    if (m) {
+      const cls = m[2] === 'OK' ? 'ok' : 'ruim';
+      const li = document.createElement('li');
+      li.textContent = `Teste ${m[1]}: ${m[2]}${m[3]}`;
+      $('testeLista').appendChild(li);
+      if (testeModo !== 'todos' || m[1] === 'de todos os eixos') {
+        resultado('testeRes', `Teste ${m[1]}: ${m[2]}${m[3]}`, cls);
+        tag('tagTeste', m[2].toLowerCase(), m[2] === 'OK' ? 'ok' : 'aviso');
+        tag('tagHA', 'teste ' + m[2].toLowerCase(), m[2] === 'OK' ? 'ok' : 'aviso');
+        testeModo = '';
+      }
+    }
+    if (/^homing FALHOU|^-- zerado|referencia se perdeu|Faca o homing|sentido do homing trocado/.test(l)) semRefX();
+
+    // Homing do X: fase ao vivo, resultado e ajustes.
+    m = l.match(/^\[homing X\] estado: (.+?), girando '(.)'/);
+    if (m) {
+      $('homFase').textContent = m[2] === '-' ? m[1] : `${m[1]} (girando ${m[2]})`;
+      tag('tagHom', 'em andamento', 'aviso');
+    }
+    if (/^-- homing \(Enter/.test(l)) resultado('homRes', '');
+    if (/^\[homing X\] sensor JA APERTADO/.test(l)) {
+      resultado('homRes', 'A chave já estava apertada na partida: o homing começa recuando.');
+    }
+    if (/homing ok em/.test(l)) {
+      $('homFase').textContent = 'ok';
+      tag('tagHom', 'ok', 'ok');
+      resultado('homRes', l, 'ok');
+    }
+    m = l.match(/homing FALHOU \((.+?)\) na fase '(.+?)'/);  // também nos ciclos do 'c'
+    if (m) {
+      $('homFase').textContent = 'falhou em ' + m[2];
+      tag('tagHom', 'falhou', 'aviso');
+      resultado('homRes', `Falhou na fase "${m[2]}": ${m[1]}.`, 'ruim');
+    }
+    if (/^   (andou o curso todo|a chave nao soltou)/.test(l)) {
+      resultado('homRes', $('homRes').textContent + ' ' + l.trim(), 'ruim');
+    }
+    m = l.match(/^homing X: sentido ([+-]\d) .*rapida (\d+) passos\/s, lenta (\d+) passos\/s, travamento (\d+) passos \((ligado|DESLIGADO)\)/);
+    if (m) {
+      sentidoX = +m[1];
+      $('inHS').value = String(sentidoX);
+      $('inHV').value = m[2];
+      $('inHL').value = m[3];
+      $('inHT').value = m[4];
+    }
+    m = l.match(/^   chave X no GPIO (\d+): (ACIONADA|solta)/);
+    if (m) {
+      chave('X', m[2] === 'ACIONADA');
+      $('diagGpio').textContent = `Chave lida no GPIO ${m[1]}. Se não muda: fio em outro pino (HOME_X no pins.h), chave NF no lugar de NA ou falta o pull-down.`;
+    }
+    m = l.match(/^(?:protecao contra colisao|deteccao de travamento): (ligada|DESLIGADA)/);
+    if (m) protecao(m[1] === 'ligada');
+    if (/^-- (protecao contra colisao|deteccao de travamento) DESLIGADA/.test(l)) protecao(false);
+    // Rotação reduzida (queda confirmada ou travada): conta no chip "quedas".
+    if (/^\[trava X\] encoder parado .*rotacao baixa|^\[vel X\] CAIU/.test(l)) travou(false);
+    m = l.match(/^setpoint X: ([\d.]+) mm\/s/);  // resposta do V
+    if (m) $('inSpV').value = m[1];
+    // Controle de rotação (resposta do G).
+    m = l.match(/^governo X: quedas para reduzir (\d+), fator de aceleracao (\d+)%, fator de desaceleracao (\d+)%, mantem (\d+) ms/);
+    if (m) {
+      $('inGQ').value = m[1];
+      $('inGA').value = m[2];
+      $('inGD').value = m[3];
+      $('inGS').value = m[4];
+    }
+    if (/^\[trava X\] TRAVOU/.test(l)) travou(true);
+
+    // Diagnóstico HD.
+    m = l.match(/^2\) andando .* (AFASTANDO|PARA a chave)/);
+    if (m) {
+      hdApertada = m[1] === 'AFASTANDO';
+      resultado('hdRes', 'andando 2 mm… olhe o carro');
+      $('hdPergunta').style.display = 'none';
+    }
+    m = l.match(/^   encoder: (.+)$/);
+    if (m) resultado('hdRes', 'Encoder: ' + m[1], /: ok$/.test(m[1]) ? 'ok' : 'ruim');
+    if (/a chave ACIONOU no caminho/.test(l)) {
+      resultado('hdRes', $('hdRes').textContent + ' — a chave acionou no caminho: o sentido está certo.',
+                $('hdRes').classList.contains('ruim') ? 'ruim' : 'ok');
+    }
+    if (/^3\) o carro foi/.test(l)) {
+      $('hdPerguntaTxt').textContent = hdApertada ? 'O carro foi para LONGE da chave?' : 'O carro foi na direção da chave?';
+      $('hdPergunta').style.display = '';
+    }
+    if (/^-- diagnostico cancelado/.test(l)) resultado('hdRes', 'cancelado');
+
+    // Posição do Z.
+    m = l.match(/\bZ: (-?[\d.]+) mm/);
+    if (m) mostrarZ(m[1]);
+    m = l.match(/^\[seq\] chegou: .* Z (-?[\d.]+) mm/);
+    if (m) mostrarZ(m[1]);
+    if (/\bZ: (sem ref|SEM REFERENCIA)|^homing do Z FALHOU|Referencia perdida|referencia do Z perdida|refaca o homing do Z/.test(l)) semRefZ();
+
+    // Chaves.
+    m = l.match(/^chave (X|Z): (ACIONADA|solta)/);
+    if (m) chave(m[1], m[2] === 'ACIONADA');
+    m = l.match(/^\[sensor\] homing (X|Z) (APERTADO|solto)/);
+    if (m) chave(m[1], m[2] === 'APERTADO');
+    m = l.match(/^\[homing (X|Z)\] SENSOR (APERTADO|solto)/);
+    if (m) chave(m[1], m[2] === 'APERTADO');
+    m = l.match(/^sensor do homing( Z)?: (APERTADO|solto)/);
+    if (m) chave(m[1] ? 'Z' : 'X', m[2] === 'APERTADO');
+
+    // Velocidades: os campos mostram o que está na placa.
+    m = l.match(/^rampa: partida (\d+) passos\/s, maxima (\d+) passos\/s .*aceleracao (\d+)/);
+    if (m) { $('inPart').value = m[1]; $('inVel').value = m[2]; $('inAcel').value = m[3]; }
+    m = l.match(/passos\/mm \(nominal [\d.]+ = [\d.]+ mm\/volta\), vel (\d+) passos\/s/);
+    if (m) $('inZV').value = m[1];
+    m = l.match(/^\s*rampa Z: partida (\d+) passos\/s, aceleracao (\d+)/);
+    if (m) { $('inZN').value = m[1]; $('inZA').value = m[2]; }
+
+    // Calibrações em dois passos.
+    if (/^>> MARQUE a posicao do carro/.test(l)) tag('tagCalX', 'MARQUE agora', 'aviso');
+    if (/^>> MARQUE a posicao do Z/.test(l)) tag('tagCalZ', 'MARQUE agora', 'aviso');
+    if (/^>> MECA .* m<mm>/.test(l)) { passoCal('X', 2); tag('tagCalX', 'meça e envie', 'aviso'); $('inMed').focus(); }
+    if (/^>> MECA .* ZM<mm>/.test(l)) { passoCal('Z', 2); tag('tagCalZ', 'meça e envie', 'aviso'); $('inZM').focus(); }
+    if (/^passos\/mm: /.test(l)) { passoCal('X', 1); tag('tagCalX', 'salva', 'ok'); }
+    if (/^Z passos\/mm: .* Salvo/.test(l)) { passoCal('Z', 1); tag('tagCalZ', 'salva', 'ok'); }
+    if (/calibracao de distancia cancelada/.test(l)) { passoCal('X', 1); tag('tagCalX', 'cancelada'); }
+    if (/calibracao do Z cancelada/.test(l)) { passoCal('Z', 1); tag('tagCalZ', 'cancelada'); }
+
+    // Programa em execução.
+    m = l.match(/^\[seq\] ciclo (\d+), ponto (\d+)\/(\d+)/);
+    if (m) $('seqEstado').textContent = `ciclo ${m[1]}, ponto ${m[2]}/${m[3]}`;
+    if (/^\[seq\] pausado/.test(l)) $('seqEstado').textContent = 'pausado';
+    if (/^-- programa (terminado|cancelado)/.test(l)) {
+      $('seqEstado').textContent = l.includes('terminado') ? 'terminado' : 'cancelado';
+    }
+    if (/^-- pausando/.test(l)) $('seqEstado').textContent = 'pausando…';
+    if (/^-- continuando/.test(l)) $('seqEstado').textContent = 'rodando';
+
+    // Reinício: queda de tensão / travamento parece alarme, mas é a placa reiniciando.
+    m = l.match(/^reinicio: (.+)$/);
+    if (m) {
+      const ruim = /BROWNOUT|PANIC|WATCHDOG/.test(m[1]);
+      if (ruim || Date.now() - conectadoEm > 4000) {
+        $('reinicioTxt').textContent = '⚠ A placa REINICIOU sozinha: ' + m[1] +
+          (/BROWNOUT/.test(m[1]) ? '. Alimente os motores por uma fonte própria de 5 V (GND comum), não pela USB.' : '') +
+          ' A referência dos eixos se perdeu.';
+        $('reinicio').classList.add('on');
+      }
+    }
+
+    // Testador de bobinas.
+    m = l.match(/^testador no motor (X|Y|Z): IN1\.\.IN4 = GPIO ([\d ]+)/);
+    if (m) { escolherTeste(m[1]); $('tGpio').textContent = 'GPIO ' + m[2].trim(); acender(''); }
+    m = l.match(/^ligado (X|Y|Z):(.*)/);
+    if (m) {
+      escolherTeste(m[1]);
+      acender((m[2].match(/LED ([A-D])/g) || []).map((s) => s.slice(-1)).join(''));
+    }
+    if (/^-- fim do teste/.test(l) || (motorTeste === 'X' && /^-- X solto/.test(l))) acender('');
+
+    // A placa reiniciou.
+    if (/^== Bancada/.test(l)) {
+      escolherTeste('X');
+      acender('');
+      travasZerar();
+      vivoLimpar();
+      yLimpar();
+      $('homFase').textContent = '—';
+      tag('tagHom', '—');
+      resultado('homRes', '');
+      resultado('hdRes', '');
+      $('hdPergunta').style.display = 'none';
+      $('seqEstado').textContent = 'parado';
+      testeModo = '';
+      tag('tagTeste', '—');
+      tag('tagHA', '—');
+      $('xEnc').textContent = '—';
+      semRefX();
+      semRefZ();
+      passoCal('X', 1);
+      passoCal('Z', 1);
+      tag('tagCalX', '—');
+      tag('tagCalZ', '—');
+    }
+  }
+
+  function desenharTabela() {
+    const t = $('tabela');
+    if (pontos.length === 0) {
+      t.innerHTML = '<div class="vazio">programa vazio: adicione pontos acima</div>';
+      return;
+    }
+    let h = '<table><thead><tr><th>#</th><th>X (mm)</th><th>Z (mm)</th><th>Y (mm)</th><th>Velocidade</th><th>Espera (ms)</th><th></th></tr></thead><tbody>';
+    for (const p of pontos) {
+      h += `<tr><td>${p.n}</td><td>${p.x}</td><td>${p.z}</td><td>${p.y || "—"}</td><td>${p.vel}</td><td>${p.espera}</td>` +
+           `<td><button class="req" data-copiar="${p.n}" title="Copia para o formulário">Copiar</button> ` +
+           `<button class="req perigo" data-apagar="${p.n}">Apagar</button></td></tr>`;
+    }
+    t.innerHTML = h + '</tbody></table>';
+    habilitar(!!escritor);
+  }
+
+  // ---------- testador ----------
+  let motorTeste = 'X';
+  function escolherTeste(eixo) {
+    motorTeste = eixo;
+    $('btnTX').classList.toggle('sel', eixo === 'X');
+    $('btnTZ').classList.toggle('sel', eixo === 'Z');
+    $('btnTY').classList.toggle('sel', eixo === 'Y');
+    $('tGiro').textContent = eixo === 'X' ? 'Girar: X = 1 volta.'
+                          : eixo === 'Y' ? 'Girar: Y = 1 volta (↻ = f, ↺ = b).' : 'Girar: Z = 5 mm (↻ desce, ↺ sobe).';
+  }
+  function acender(letras) {
+    for (const c of 'ABCD') $('led' + c).classList.toggle('on', letras.includes(c));
+  }
+  $('btnGiroF').onclick = () => enviar(motorTeste === 'X' ? 'f' : motorTeste === 'Y' ? 'YF1' : 'Z+5');
+  $('btnGiroB').onclick = () => enviar(motorTeste === 'X' ? 'b' : motorTeste === 'Y' ? 'YB1' : 'Z-5');
+
+  // ---------- botões ----------
+  $('btnConectar').onclick = () => (porta ? desconectar() : conectar());
+  $('btnReinicioOk').onclick = () => $('reinicio').classList.remove('on');
+  $('btnAplicarH').onclick = async () => {
+    const hs = +$('inHS').value;
+    if (hs !== sentidoX && !confirm('Trocar o lado da chave? A referência do X se perde (refaça o homing).')) return;
+    await enviar('HV' + $('inHV').value);
+    await enviar('HL' + $('inHL').value);
+    await enviar('HT' + $('inHT').value);
+    await enviar('HS' + (hs > 0 ? '+1' : '-1'));
+  };
+  $('hdSim').onclick = () => {
+    $('hdPergunta').style.display = 'none';
+    resultado('hdRes', $('hdRes').textContent + ' Sentido confirmado.', $('hdRes').className.includes('ruim') ? 'ruim' : 'ok');
+  };
+  $('hdNao').onclick = () => {
+    if (!confirm('Trocar o sentido do homing (a chave fica do outro lado)? A referência do X se perde.')) return;
+    $('hdPergunta').style.display = 'none';
+    enviar('HS' + (sentidoX > 0 ? '-1' : '+1'));
+  };
+
+  function adicionar() {
+    const x = parseFloat($('inX').value);
+    const z = parseFloat($('inZ').value) || 0;
+    const v = parseFloat($('inV').value) || 0;
+    const e = Math.max(0, Math.round(parseFloat($('inE').value) || 0));
+    if (!isFinite(x)) { $('inX').focus(); return; }
+    const yTxt = $('inY').value.trim();  // eixo Y: vazio = não mexe
+    enviar(`S${x} ${z} ${v} ${e}` + (yTxt !== '' && isFinite(parseFloat(yTxt)) ? ` y${parseFloat(yTxt)}` : ''));
+  }
+  $('btnAdicionar').onclick = adicionar;
+  ['inX', 'inZ', 'inY', 'inV', 'inE'].forEach((id) => {
+    $(id).addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && escritor) adicionar(); });
+  });
+  $('btnAtual').onclick = () => {
+    if (atual.x === null || atual.z === null) {
+      alert('Posição desconhecida: faça o homing do X e do Z (aba Operar) antes.');
+      return;
+    }
+    $('inX').value = atual.x.toFixed(1);
+    $('inZ').value = atual.z.toFixed(1);
+    if (atual.y !== null && atual.y !== undefined) $('inY').value = atual.y.toFixed(1);
+  };
+  $('btnExecutar').onclick = () => {
+    const c = Math.max(0, Math.round(parseFloat($('inCiclos').value) || 0));
+    enviar(c === 1 ? 'R' : 'R' + c);
+  };
+  // Velocidades: manda os três valores de uma vez.
+  $('btnAplicarX').onclick = async () => {
+    await enviar('v' + $('inVel').value);
+    await enviar('a' + $('inAcel').value);
+    await enviar('n' + $('inPart').value);
+  };
+  $('btnAplicarZ').onclick = async () => {
+    await enviar('ZV' + $('inZV').value);
+    await enviar('ZA' + $('inZA').value);
+    await enviar('ZN' + $('inZN').value);
+  };
+  $('btnAplicarYH').onclick = async () => {
+    const hs = +$('inYHS').value;
+    if (!confirm('Aplicar os ajustes do homing do Y?' + (hs ? '\nSe o lado da chave mudar, a referência do Y se perde (refaça o YH).' : ''))) return;
+    await enviar('YHS' + (hs > 0 ? '+1' : '-1'));
+    await enviar('YHV' + $('inYHV').value);
+    await enviar('YHL' + $('inYHL').value);
+    await enviar('YHT' + $('inYHT').value);
+  };
+  $('btnAplicarYVel').onclick = async () => {
+    await enviar('YV' + $('inYVel').value);
+    await enviar('YA' + $('inYAcel').value);
+    await enviar('YN' + $('inYPart').value);
+  };
+  $('btnAplicarYG').onclick = async () => {
+    await enviar('YGQ' + $('inYGQ').value);
+    await enviar('YGA' + $('inYGA').value);
+    await enviar('YGD' + $('inYGD').value);
+    await enviar('YGS' + $('inYGS').value);
+  };
+  $('btnAplicarG').onclick = async () => {
+    await enviar('GQ' + $('inGQ').value);
+    await enviar('GA' + $('inGA').value);
+    await enviar('GD' + $('inGD').value);
+    await enviar('GS' + $('inGS').value);
+  };
+
+  document.addEventListener('click', (ev) => {
+    const b = ev.target.closest('button');
+    if (!b || b.disabled) return;
+    if (b.dataset.confirm && !confirm(b.dataset.confirm)) return;
+    if (b.dataset.cmd) enviar(b.dataset.cmd);
+    // Comando + valor de um campo (ex.: "x" + mm). Campo vazio = só a letra
+    // (o ESP32 usa o padrão), exceto onde o valor é obrigatório (data-obrig).
+    if (b.dataset.pre) {
+      const campo = $(b.dataset.in);
+      const v = campo ? campo.value.trim().replace(',', '.') : '';
+      if (!v && b.dataset.obrig) { campo.focus(); return; }
+      enviar(b.dataset.pre + v);
+    }
+    // Jog do X em mm PELO ENCODER: negativo = rumo à chave (X diminui),
+    // positivo = afastando. x-mm / x+mm valem também sem homing.
+    if (b.dataset.jogx) {
+      const mm = parseFloat(b.dataset.jogx);
+      enviar('x' + (mm < 0 ? '-' : '+') + Math.abs(mm));
+    }
+    if (b.dataset.apagar && confirm('Apagar o ponto ' + b.dataset.apagar + '?')) enviar('S-' + b.dataset.apagar);
+    if (b.dataset.copiar) {
+      const p = pontos.find((q) => q.n === +b.dataset.copiar);
+      if (p) { $('inX').value = p.x; $('inZ').value = p.z; $('inE').value = p.espera; $('inY').value = p.y === '—' ? '' : p.y; }
+    }
+  });
+
+  // Esc = PARAR em qualquer lugar da página.
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && escritor) { ev.preventDefault(); enviar('q'); }
+  });
+
+  // Comando manual com histórico (↑ / ↓).
+  const hist = [];
+  let hi = 0;
+  function enviarManual() {
+    const c = $('inCmd').value.trim();
+    if (!c) return;
+    enviar(c);
+    if (hist[hist.length - 1] !== c) hist.push(c);
+    hi = hist.length;
+    $('inCmd').value = '';
+  }
+  $('btnEnviar').onclick = enviarManual;
+  $('inCmd').addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') enviarManual();
+    if (ev.key === 'ArrowUp' && hi > 0) { hi--; $('inCmd').value = hist[hi]; ev.preventDefault(); }
+    if (ev.key === 'ArrowDown') { hi = Math.min(hist.length, hi + 1); $('inCmd').value = hist[hi] || ''; }
+  });
+  vivoLegenda();
+  yLegenda();
+  yDesenhar();
+  vivoDesenhar();
+})();
+</script>
+</body>
+</html>
