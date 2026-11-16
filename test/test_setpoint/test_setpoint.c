@@ -338,8 +338,55 @@ void test_pausar_ou_continuar_fora_de_hora_nao_faz_nada(void) {
   TEST_ASSERT_EQUAL_INT(SEQ_NADA, seq_pausar(&s));
 }
 
+// ---------- eixo Y (opcional por ponto) ----------
+
+static const EixoMm EY = {0.0f, 190.0f, 256.0f, -1};
+
+static Setpoint spY(float x, float z, float y) {
+  Setpoint s = sp(x, z, 0, 0);
+  s.tem_y = true;
+  s.y_mm = y;
+  return s;
+}
+
+void test_ponto_sem_y_nao_confere_o_y(void) {
+  LIM.y = EY;
+  Setpoint s = sp(50, 10, 0, 0);
+  s.y_mm = 999.0f;  // ignorado: tem_y = false
+  TEST_ASSERT_EQUAL_INT(PROG_OK, prog_conferir(&LIM, &s));
+}
+
+void test_y_dentro_e_fora_do_curso(void) {
+  LIM.y = EY;
+  Programa p;
+  prog_limpar(&p);
+  TEST_ASSERT_EQUAL_INT(PROG_OK, prog_adicionar(&p, &LIM, spY(50, 10, 0)));
+  TEST_ASSERT_EQUAL_INT(PROG_OK, prog_adicionar(&p, &LIM, spY(50, 10, 190)));
+  TEST_ASSERT_EQUAL_INT(PROG_Y_FORA_DO_CURSO, prog_adicionar(&p, &LIM, spY(50, 10, -1)));
+  TEST_ASSERT_EQUAL_INT(PROG_Y_FORA_DO_CURSO, prog_adicionar(&p, &LIM, spY(50, 10, 190.5f)));
+  TEST_ASSERT_EQUAL_UINT8(2, p.n);
+  TEST_ASSERT_TRUE(p.p[1].tem_y);
+  TEST_ASSERT_FLOAT_WITHIN(1e-4f, 190.0f, p.p[1].y_mm);
+  TEST_ASSERT_EQUAL_STRING("Y fora do curso", prog_erro_nome(PROG_Y_FORA_DO_CURSO));
+}
+
+void test_validar_pega_y_fora_do_curso(void) {
+  LIM.y = EY;
+  Programa p;
+  prog_limpar(&p);
+  prog_adicionar(&p, &LIM, spY(50, 10, 100));
+  ProgLimites curto = LIM;
+  curto.y.curso_mm = 50.0f;
+  uint8_t i = 9;
+  TEST_ASSERT_EQUAL_INT(PROG_Y_FORA_DO_CURSO, prog_validar(&p, &curto, &i));
+  TEST_ASSERT_EQUAL_UINT8(0, i);
+}
+
 int main(void) {
   UNITY_BEGIN();
+  RUN_TEST(test_ponto_sem_y_nao_confere_o_y);
+  RUN_TEST(test_y_dentro_e_fora_do_curso);
+  RUN_TEST(test_validar_pega_y_fora_do_curso);
   RUN_TEST(test_limites_do_curso_x);
   RUN_TEST(test_limites_do_curso_z);
   RUN_TEST(test_nan_fica_fora_do_curso);

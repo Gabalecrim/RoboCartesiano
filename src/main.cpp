@@ -140,7 +140,7 @@
 //   p    -> próxima fase da sequência (2 bobinas), sentido de 'f'
 //   o    -> fase anterior, sentido de 'b'
 //   l    -> apaga tudo
-//   TX / TZ -> escolhe o motor testado (padrão X);  T -> mostra
+//   TX / TZ / TY -> escolhe o motor testado (padrão X);  T -> mostra
 //   T0   -> fim do teste: X solto, Z volta a segurar
 //   Testar o Z perde a referência dele (com uma bobina só o Z pode descer).
 //   Cada comando imprime quais INs, GPIOs e LEDs devem estar acesos.
@@ -161,6 +161,7 @@
 #include "pins.h"
 #include "colisao.h"
 #include "eixo.h"
+#include "eixo_y.h"  // eixo Y (módulo à parte, 2026-11-15)
 #include "encoder.h"
 #include "governo.h"
 #include "malha.h"
@@ -433,6 +434,7 @@ static ProgLimites limites() {
   l.x = eixoMm();
   l.z = eixoZmm();
   l.vmax_mm_s = vmaxMm() > vmaxZmm() ? vmaxMm() : vmaxZmm();
+  l.y = yEixoMm();  // eixo Y
   return l;
 }
 
@@ -567,15 +569,24 @@ static void imprimir() {
 // primeiro 'p' mostrar a fase 0.
 static uint8_t faseTeste = 3;
 
-// Motor do testador (TX / TZ). O Z mexido pelo testador perde a referência:
+// Motor do testador (TX / TZ / TY). O Z mexido pelo testador perde a referência:
 // com uma bobina só (ou nenhuma) o fuso de alto avanço pode descer.
 static Stepper *motTeste = &motX;
 static bool zEmTeste = false;  // o testador mexeu nas bobinas do Z
-static const char *nomeTeste() { return motTeste == &motZ ? "Z" : "X"; }
+static bool yEmTeste = false;  // o testador mexeu nas bobinas do Y (TY)
+static const char *nomeTeste() {
+  if (motTeste == &motZ) return "Z";
+  return yEmTeste ? "Y" : "X";
+}
 
-// Fim do teste: X solto; Z volta a segurar na fase dele (Z_SEGURAR).
+// Fim do teste: X e Y soltos; Z volta a segurar na fase dele (Z_SEGURAR).
 static void terminarTeste() {
   stepper_release(&motX);
+  if (yEmTeste) {
+    ySoltar();
+    yEmTeste = false;
+    motTeste = &motX;
+  }
   if (zEmTeste) {
     if (Z_SEGURAR) {
       stepper_hold(&motZ);
@@ -587,19 +598,24 @@ static void terminarTeste() {
   faseTeste = 3;
 }
 
-// T -> mostra;  TX / TZ -> escolhe o motor;  T0 -> fim do teste.
+// T -> mostra;  TX / TZ / TY -> escolhe o motor;  T0 -> fim do teste.
 static void comandoTeste(String resto) {
   resto.trim();
   resto.toUpperCase();
-  if (resto == "X" || resto == "Z") {
+  if (resto == "X" || resto == "Z" || resto == "Y") {
     terminarTeste();
-    motTeste = resto == "Z" ? &motZ : &motX;
+    if (resto == "Y") {
+      motTeste = yMotor();  // eixo Y (2026-11-15): mesmo testador
+      yEmTeste = true;
+    } else {
+      motTeste = resto == "Z" ? &motZ : &motX;
+    }
   } else if (resto == "0") {
     terminarTeste();
-    Serial.printf("-- fim do teste: X solto, Z %s --\n", Z_SEGURAR ? "segurando" : "solto");
+    Serial.printf("-- fim do teste: X e Y soltos, Z %s --\n", Z_SEGURAR ? "segurando" : "solto");
     return;
   } else if (resto.length()) {
-    Serial.printf("comando invalido: 'T%s' (T, TX, TZ, T0)\n", resto.c_str());
+    Serial.printf("comando invalido: 'T%s' (T, TX, TZ, TY, T0)\n", resto.c_str());
     return;
   }
   Serial.printf("testador no motor %s: IN1..IN4 = GPIO %u %u %u %u\n", nomeTeste(),
@@ -621,6 +637,10 @@ static void testarBobinas(uint8_t coils) {
       zReferenciado = false;
       andandoZ = false;
     }
+  }
+  if (yEmTeste && yOcupado()) {
+    Serial.println("Y andando: espere parar (YQ)");
+    return;
   }
   stepper_test_coils(motTeste, coils);
   Serial.printf("ligado %s:", nomeTeste());
@@ -946,6 +966,7 @@ static void mostrarChave() {
   Serial.printf("chave Z: %s (GPIO %u = %s)%s\n", eixo_chave_crua(&eixoZ) ? "ACIONADA" : "solta",
                 HOME_Z, digitalRead(HOME_Z) ? "HIGH" : "LOW",
                 Z_TEM_CHAVE ? "" : "  [Z_TEM_CHAVE = false: nao usada]");
+  yMostrarChave();  // eixo Y
 }
 
 // ---------- calibração de distância ----------
@@ -1159,7 +1180,7 @@ static void carregarPrograma() {
     if (prefs.getBytesLength("x") == sizeof programa) {
       prefs.getBytes("x", &programa, sizeof programa);
     } else {
-      Serial.println("programa salvo no formato antigo (so X): apagado");
+      Serial.println("programa salvo no formato antigo (antes do eixo Y): apagado, cadastre os pontos de novo");
     }
   }
   prefs.end();
@@ -1186,8 +1207,11 @@ static uint32_t velocidadeDoPonto(const Setpoint *sp, float passos_mm, uint32_t 
 static void listarPrograma() {
   EixoMm e = eixoMm();
   EixoMm z = eixoZmm();
-  Serial.printf("programa X (centro do braco, %.0f a %.0f mm) Z (topo 0 a %.0f mm): %u ponto(s)\n",
-                eixo_mm_min(&e), eixo_mm_max(&e), eixo_mm_max(&z), programa.n);
+  EixoMm ey = yEixoMm();
+  Serial.printf("programa X (centro do braco, %.0f a %.0f mm) Z (topo 0 a %.0f mm): %u ponto(s);"
+                " Y de %.0f a %.0f mm\n",
+                eixo_mm_min(&e), eixo_mm_max(&e), eixo_mm_max(&z), programa.n, eixo_mm_min(&ey),
+                eixo_mm_max(&ey));
   for (uint8_t i = 0; i < programa.n; i++) {
     const Setpoint &p = programa.p[i];
     Serial.printf("  %2u: X %7.2f mm  Z %6.2f mm   ", i + 1, p.x_mm, p.z_mm);
@@ -1197,9 +1221,15 @@ static void listarPrograma() {
       Serial.printf("padrao (X %.2f, Z %.2f mm/s)", velocidade / passosPorMm,
                     velocidadeZ / zPassosPorMm);
     }
-    Serial.printf("   espera %lu ms\n", (unsigned long)p.espera_ms);
+    Serial.printf("   espera %lu ms", (unsigned long)p.espera_ms);
+    // Y no fim da linha (o painel lê X, Z, velocidade e espera do começo).
+    if (p.tem_y) {
+      Serial.printf("   Y %7.2f mm\n", p.y_mm);
+    } else {
+      Serial.println("   Y -");
+    }
   }
-  if (programa.n == 0) Serial.println("  (vazio) acrescente com S<x> <z>, ex.: S120 40");
+  if (programa.n == 0) Serial.println("  (vazio) acrescente com S<x> <z> [y<mm>], ex.: S120 40 y95");
 }
 
 // Programa rodando ou pausado: não deixa mudar (os índices mudariam).
@@ -1214,6 +1244,26 @@ static bool programaEmUso() {
 static bool lerSetpoint(String s, Setpoint *out) {
   s.replace(',', '.');
   s.trim();
+  // Eixo Y (opcional): "y<mm>" em qualquer lugar depois do X, ex.: S120 40 y95.
+  // Sem ele, o Y não mexe neste ponto.
+  out->tem_y = false;
+  out->y_mm = 0.0f;
+  int iy = s.indexOf('y');
+  if (iy < 0) iy = s.indexOf('Y');
+  if (iy >= 0) {
+    String ys = s.substring(iy + 1);
+    s = s.substring(0, iy);
+    ys.trim();
+    s.trim();
+    const char *cy = ys.c_str();
+    char *fy;
+    float y = strtof(cy, &fy);
+    if (fy == cy) return false;
+    while (*fy == ' ') fy++;
+    if (*fy != '\0') return false;
+    out->tem_y = true;
+    out->y_mm = y;
+  }
   const char *c = s.c_str();
   char *fim;
   out->x_mm = strtof(c, &fim);
@@ -1273,7 +1323,7 @@ static void comandoSetpoint(String resto) {
 
   Setpoint sp;
   if (!lerSetpoint(resto, &sp)) {
-    Serial.printf("setpoint invalido: '%s' (use S<x> [z] [mm/s] [ms], ex.: S120 40 1.5 2000)\n",
+    Serial.printf("setpoint invalido: '%s' (use S<x> [z] [mm/s] [ms] [y<mm>], ex.: S120 40 1.5 2000 y95)\n",
                   resto.c_str());
     return;
   }
@@ -1286,6 +1336,9 @@ static void comandoSetpoint(String resto) {
     }
     if (r == PROG_Z_FORA_DO_CURSO) {
       Serial.printf(" (Z de %.0f a %.0f mm)", eixo_mm_min(&l.z), eixo_mm_max(&l.z));
+    }
+    if (r == PROG_Y_FORA_DO_CURSO) {
+      Serial.printf(" (Y de %.0f a %.0f mm)", eixo_mm_min(&l.y), eixo_mm_max(&l.y));
     }
     if (r == PROG_VEL_INVALIDA) Serial.printf(" (0 a %.2f mm/s)", l.vmax_mm_s);
     if (r == PROG_ESPERA_INVALIDA) Serial.printf(" (ate %lu ms)", (unsigned long)PROG_ESPERA_MAX_MS);
@@ -1303,19 +1356,24 @@ static void executarAcao(SeqAcao a) {
     malha_cancelar(&malhaX);  // senão, parado, ela corrigiria de volta ao alvo
     stepper_stop(&motX);
     stepper_stop(&motZ);
+    yParar();  // eixo Y
     return;
   }
   if (a != SEQ_MOVER) return;
   const Setpoint *sp = seq_alvo(&seq);
   if (seq.fase == 0) {
-    Serial.printf("[seq] ciclo %lu, ponto %u/%u -> X %.2f mm Z %.2f mm\n",
-                  (unsigned long)seq.ciclo + 1, seq.i + 1, programa.n, sp->x_mm, sp->z_mm);
+    Serial.printf("[seq] ciclo %lu, ponto %u/%u -> X %.2f mm Z %.2f mm", (unsigned long)seq.ciclo + 1,
+                  seq.i + 1, programa.n, sp->x_mm, sp->z_mm);
+    if (sp->tem_y) Serial.printf(" Y %.2f mm", sp->y_mm);
+    Serial.println();
   }
   // Fase sem deslocamento: não liga o motor (o sequenciador vê parado = feita).
   if (seq_eixo(&seq) == SEQ_EIXO_X) {
     // Sempre chama xIr: mesmo sem mover, ela registra o resultado (CHEGOU).
     stepper_set_speed(&motX, velocidadeDoPonto(sp, passosPorMm, velocidade, VEL_LIMITE));
     if (xIr(sp->x_mm)) Serial.printf("[seq]   X -> %.2f mm\n", sp->x_mm);
+    // Eixo Y: anda junto com o X (os dois são horizontais), pelo encoder do Y.
+    if (sp->tem_y && yIrMm(sp->y_mm, sp->vel_mm_s)) Serial.printf("[seq]   Y -> %.2f mm\n", sp->y_mm);
   } else {
     EixoMm e = eixoZmm();
     int32_t alvo = eixo_mm_para_passos(&e, sp->z_mm);
@@ -1330,6 +1388,7 @@ static void executarAcao(SeqAcao a) {
 static void fimDoPrograma(const char *como) {
   stepper_set_speed(&motX, velocidade);  // volta as velocidades padrão
   stepper_set_speed(&motZ, velocidadeZ);
+  yRestaurarVelocidade();
   Serial.printf("-- programa %s --  ", como);
   imprimir();
 }
@@ -1337,7 +1396,7 @@ static void fimDoPrograma(const char *como) {
 // Chamada a cada volta do loop().
 static void atualizarSequencia() {
   if (!seq_ativo(&seq)) return;
-  bool ocupado = xOcupado() || stepper_busy(&motZ);
+  bool ocupado = xOcupado() || stepper_busy(&motZ) || yOcupado();  // Y anda na fase do X
 
   if (seq_estado(&seq) == SEQ_MOVENDO && !ocupado && seq.fase == 1) {
     // Chegou no ponto. O X foi pelo encoder: passo perdido já foi corrigido.
@@ -1345,6 +1404,7 @@ static void atualizarSequencia() {
     Serial.printf("[seq] chegou: X %.2f mm (encoder %ld cont) Z %.2f mm", encoderMm(),
                   (long)encoder_count(&encX), zMm());
     const Setpoint *sp = seq_alvo(&seq);
+    if (sp->tem_y) Serial.printf(" Y %.2f mm", yPosicaoMm());
     if (sp->espera_ms) Serial.printf(", espera %lu ms", (unsigned long)sp->espera_ms);
     Serial.println();
     if (malha_estado(&malhaX) == MALHA_FALHOU) {
@@ -1380,6 +1440,10 @@ static void rodarPrograma(String resto) {
     Serial.println("Z andando: espere parar");
     return;
   }
+  if (yOcupado()) {
+    Serial.println("Y andando: espere parar (YQ)");
+    return;
+  }
   resto.trim();
   uint32_t ciclos = 1;
   if (resto.length() && !lerInteiro(resto, true, &ciclos)) return;
@@ -1395,6 +1459,13 @@ static void rodarPrograma(String resto) {
     Serial.println("sem referencia: fazendo o homing antes");
     fazerHoming();
     if (!referenciado) return;
+  }
+  // Eixo Y: se algum ponto usa o Y, ele precisa de referência.
+  bool usaY = false;
+  for (uint8_t i = 0; i < programa.n; i++) usaY = usaY || programa.p[i].tem_y;
+  if (usaY && !yReferenciado()) {
+    Serial.println("Y sem referencia: fazendo o homing do Y antes");
+    if (!yHomingGeral()) return;
   }
   if (ciclos == 0) {
     Serial.printf("-- programa: %u ponto(s), repetindo sem fim (P pausa, q cancela) --\n", programa.n);
@@ -1415,8 +1486,14 @@ static void pausarOuContinuar() {
       Serial.println("o Z perdeu a referencia na pausa: ZH (ou ZR no topo) e envie P de novo");
       return;
     }
-    if (stepper_busy(&motX) || stepper_busy(&motZ)) {
+    if (stepper_busy(&motX) || stepper_busy(&motZ) || yOcupado()) {
       Serial.println("motor andando: espere parar e envie P de novo");
+      return;
+    }
+    bool usaY = false;
+    for (uint8_t i = 0; i < programa.n; i++) usaY = usaY || programa.p[i].tem_y;
+    if (usaY && !yReferenciado()) {
+      Serial.println("o Y perdeu a referencia na pausa: YH (ou YR) e envie P de novo");
       return;
     }
     Serial.println("-- continuando --");
@@ -1911,7 +1988,7 @@ static bool podeTestar() {
 }
 
 static TesteRes homingGeral() {
-  Serial.println("== homing de todos os eixos: Z (DESCE ate a chave) e depois X ==");
+  Serial.println("== homing de todos os eixos: Z (DESCE ate a chave), depois X e Y ==");
   if (Z_TEM_CHAVE) {
     if (!fazerHomingZ()) {
       Serial.println("== homing geral: FALHOU no Z ==");
@@ -1927,7 +2004,13 @@ static TesteRes homingGeral() {
     Serial.println("== homing geral: FALHOU no X ==");
     return xHomingFalhou();
   }
-  Serial.printf("== homing geral: OK (X %.2f mm, Z %.2f mm) ==\n", encoderMm(), zMm());
+  // Eixo Y (2026-11-15): por último, depois do X.
+  if (!yHomingGeral()) {
+    Serial.println("== homing geral: FALHOU no Y ==");
+    return TESTE_FALHOU;
+  }
+  Serial.printf("== homing geral: OK (X %.2f mm, Z %.2f mm, Y %.2f mm) ==\n", encoderMm(), zMm(),
+                yPosicaoMm());
   return TESTE_OK;
 }
 
@@ -2059,18 +2142,25 @@ static void testeTodos() {
     return;
   }
   TesteRes z = testeZ();
-  bool ok = x == TESTE_OK && z == TESTE_OK;
-  Serial.printf("== teste de todos os eixos: %s (X %s, Z %s) ==\n",
-                z == TESTE_CANCELADO ? "CANCELADO" : (ok ? "OK" : "FALHOU"), testeNome(x),
-                testeNome(z));
+  if (z == TESTE_CANCELADO) {
+    Serial.printf("== teste de todos os eixos: CANCELADO (X %s, Z CANCELADO) ==\n", testeNome(x));
+    return;
+  }
+  // Eixo Y (2026-11-15): por último (o Z já voltou ao topo).
+  int ry = yTesteGeral();
+  TesteRes y = ry == 0 ? TESTE_OK : (ry == 2 ? TESTE_CANCELADO : TESTE_FALHOU);
+  bool ok = x == TESTE_OK && z == TESTE_OK && y == TESTE_OK;
+  Serial.printf("== teste de todos os eixos: %s (X %s, Z %s, Y %s) ==\n",
+                y == TESTE_CANCELADO ? "CANCELADO" : (ok ? "OK" : "FALHOU"), testeNome(x),
+                testeNome(z), testeNome(y));
 }
 
-// E -> todos;  EX -> só o X;  EZ -> só o Z.
+// E -> todos;  EX -> só o X;  EZ -> só o Z;  EY -> só o Y.
 static void comandoEnsaio(String resto) {
   resto.trim();
   resto.toUpperCase();
-  if (resto.length() && resto != "X" && resto != "Z") {
-    Serial.printf("comando invalido: 'E%s' (E, EX, EZ)\n", resto.c_str());
+  if (resto.length() && resto != "X" && resto != "Z" && resto != "Y") {
+    Serial.printf("comando invalido: 'E%s' (E, EX, EZ, EY)\n", resto.c_str());
     return;
   }
   if (!podeTestar()) return;
@@ -2079,6 +2169,8 @@ static void comandoEnsaio(String resto) {
     testeX();
   } else if (resto == "Z") {
     testeZ();
+  } else if (resto == "Y") {
+    yTesteGeral();
   } else {
     testeTodos();
   }
@@ -2789,7 +2881,7 @@ void setup() {
   Serial.println("f = volta p/ frente, b = volta p/ tras, q = para, l = solta, r = zera");
   Serial.println("f3 / b0.5 = numero de voltas (sem numero = 1)");
   Serial.println("v800 = vel. maxima, a1500 = aceleracao (a0 sem rampa), n300 = partida");
-  Serial.println("teste de bobinas: TX / TZ escolhe o motor, 1..4 = so uma entrada,");
+  Serial.println("teste de bobinas: TX / TZ / TY escolhe o motor, 1..4 = so uma entrada,");
   Serial.println("           p/o = proxima/anterior fase, T0 = fim do teste");
   Serial.println("e = liga/desliga monitor do encoder (A e B crus)");
   Serial.println("h = homing, c3 = auto calibracao (3 ciclos), s = mostra a chave");
@@ -2797,8 +2889,8 @@ void setup() {
   Serial.println("           HS+1 / HS-1 sentido da chave, HD diagnostico (anda 2 mm e confere)");
   Serial.println("V = setpoint de velocidade do X em mm/s (V1.8); pelo encoder: caiu -> menos rotacao, tenta recuperar a cada 1 s");
   Serial.println("G = governo: GQ2 quedas para reduzir, GA50 fator de aceleracao %, GD70 fator de desaceleracao %, GS1000 mantem (ms), G0 padroes");
-  Serial.println("HA = homing de todos os eixos (Z desce ate a chave, depois o X)");
-  Serial.println("E = teste de todos os eixos, EX so o X, EZ so o Z (homing, pontos e repeticao da chave)");
+  Serial.println("HA = homing de todos os eixos (Z desce ate a chave, depois o X e o Y)");
+  Serial.println("E = teste de todos os eixos, EX so o X, EZ so o Z, EY so o Y (homing, pontos e repeticao da chave)");
   Serial.println("d100 = calibra distancia, m99.6 = medida real, k = calibracao (k0 = nominal)");
   Serial.printf("x120 = vai para X = 120 mm (centro do braco, %.0f a %.0f mm; depois do homing)\n",
                 X_HOME_MM, X_HOME_MM + CURSO_X_MM);
@@ -2808,11 +2900,12 @@ void setup() {
   Serial.println("           Z40 vai (h faz o homing do Z antes do X, se faltar)");
   Serial.println("           ZV300 velocidade, ZA600 aceleracao, ZN150 partida, ZD50 / ZM49.6 calibra,");
   Serial.println("           ZK calibracao, ZL solta as bobinas");
-  Serial.println("setpoints: S lista, S<x> <z> [mm/s] [ms] acrescenta (ex.: S120 40), S-2 / S- apaga");
+  Serial.println("setpoints: S lista, S<x> <z> [mm/s] [ms] [y<mm>] acrescenta (ex.: S120 40 y95), S-2 / S- apaga");
   Serial.println("           R / R3 / R0 executa 1x / 3x / sem fim, P pausa/continua, q cancela");
   Serial.println("travou (encoder parado): o X baixa a rotacao e continua, sem alarme; C mostra, C0/C1");
   Serial.println("t, t2 = mede a velocidade com o encoder ligado e parado");
   Serial.println("w = varredura de velocidade (acha o limite), g = grava a curva da rampa (CSV)");
+  yAjuda();  // eixo Y
   Serial.printf("encoder: amostra a cada %u us (%u Hz), debounce %u us = %u amostras\n",
                 ENCODER_SAMPLE_PERIOD_US, ENCODER_SAMPLE_RATE_HZ, ENCODER_DEBOUNCE_US,
                 ENCODER_DEBOUNCE_SAMPLES);
@@ -2873,6 +2966,7 @@ void setup() {
   }
   zMostrar();
   imprimir();
+  yIniciar();  // eixo Y: motor, encoder, chave, malha e governo próprios
 }
 
 // Executa uma linha completa: a letra é o comando, o resto é o número.
@@ -2890,6 +2984,7 @@ static void executar(const String &linha) {
     case 'f': mover(+1, resto); return;
     case 'b': mover(-1, resto); return;
     case 'q':
+      yParar();  // PARAR (Esc) freia o Y também
       if (cancelarPrograma()) return;
       malha_cancelar(&malhaX);
       stepper_stop(&motX);
@@ -2907,6 +3002,7 @@ static void executar(const String &linha) {
     case 'v': ajustarVelocidade(resto); return;
     case 'V': comandoSetpointVel(resto); return;
     case 'G': comandoGoverno(resto); return;
+    case 'Y': yComando(resto); return;  // eixo Y
     case 'a': ajustarAceleracao(resto); return;
     case 'n': ajustarPartida(resto); return;
     case 'h': fazerHoming(); break;
@@ -2920,6 +3016,7 @@ static void executar(const String &linha) {
     case 'w': varrerVelocidade(resto); return;
     case 'g': gravarCurva(resto); return;
     case 'l':
+      ySoltar();  // e solta o Y
       malha_cancelar(&malhaX);
       stepper_release(&motX);
       zPararNaHora();  // Z para (solto, a menos que Z_SEGURAR)
@@ -2986,6 +3083,7 @@ void loop() {
   xAtualizarMalha();  // antes do sequenciador: ele espera a malha terminar
   governarX();        // limite de velocidade sobe com o tempo andando sem travar
   telemetria();       // "@T" para o painel desenhar posição e velocidade
+  yLoop();            // eixo Y: malha, governo, chave e telemetria "@Y"
   atualizarSequencia();
   if (andando && !xOcupado()) {
     andando = false;

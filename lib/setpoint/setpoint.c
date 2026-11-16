@@ -33,6 +33,7 @@ void prog_limpar(Programa *p) { p->n = 0; }
 ProgErro prog_conferir(const ProgLimites *l, const Setpoint *sp) {
   if (!eixo_mm_dentro(&l->x, sp->x_mm)) return PROG_X_FORA_DO_CURSO;
   if (!eixo_mm_dentro(&l->z, sp->z_mm)) return PROG_Z_FORA_DO_CURSO;
+  if (sp->tem_y && !eixo_mm_dentro(&l->y, sp->y_mm)) return PROG_Y_FORA_DO_CURSO;
   if (!(sp->vel_mm_s >= 0.0f) || sp->vel_mm_s > l->vmax_mm_s + 1e-6f) return PROG_VEL_INVALIDA;
   if (sp->espera_ms > PROG_ESPERA_MAX_MS) return PROG_ESPERA_INVALIDA;
   return PROG_OK;
@@ -77,6 +78,7 @@ const char *prog_erro_nome(ProgErro e) {
     case PROG_VEL_INVALIDA: return "velocidade invalida";
     case PROG_ESPERA_INVALIDA: return "espera invalida";
     case PROG_INDICE_INVALIDO: return "ponto inexistente";
+    case PROG_Y_FORA_DO_CURSO: return "Y fora do curso";
   }
   return "?";
 }

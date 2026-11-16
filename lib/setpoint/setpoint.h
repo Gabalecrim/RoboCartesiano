@@ -1,6 +1,6 @@
 #pragma once
 // =============================================================
-//  Setpoints em mm (eixos X e Z) - lógica PURA
+//  Setpoints em mm (eixos X, Z e Y) - lógica PURA
 // =============================================================
 //
 // 1. Coordenada de cada eixo em mm (EixoMm):
@@ -64,6 +64,10 @@ typedef struct Setpoint {
   float z_mm;          // descida a partir do topo
   float vel_mm_s;      // 0 = velocidade padrão (a máxima de cada eixo)
   uint32_t espera_ms;  // parado no ponto antes de seguir
+  // Eixo Y (2026-11-15): opcional. tem_y = false -> o Y não mexe neste ponto.
+  // Anda na mesma fase do X (os dois são horizontais; o Z sobe antes / desce depois).
+  bool tem_y;
+  float y_mm;
 } Setpoint;
 
 typedef struct Programa {
@@ -76,6 +80,7 @@ typedef struct ProgLimites {
   EixoMm x;
   EixoMm z;
   float vmax_mm_s;  // velocidade mais alta aceita (a do eixo mais rápido)
+  EixoMm y;         // eixo Y (só conferido nos pontos com tem_y)
 } ProgLimites;
 
 typedef enum ProgErro {
@@ -86,6 +91,7 @@ typedef enum ProgErro {
   PROG_VEL_INVALIDA,     // negativa ou acima do limite
   PROG_ESPERA_INVALIDA,  // acima de PROG_ESPERA_MAX_MS
   PROG_INDICE_INVALIDO,
+  PROG_Y_FORA_DO_CURSO,
 } ProgErro;
 
 #define PROG_ESPERA_MAX_MS 600000u  // 10 min

@@ -35,6 +35,12 @@ constexpr uint8_t MOT_Z_IN2 = 25;
 constexpr uint8_t MOT_Z_IN3 = 26;
 constexpr uint8_t MOT_Z_IN4 = 27;
 // O 14 (IN1 do Z) dá pulsos no boot: no máximo um tranco no Z ao ligar.
+// Y (2026-11-15): as 4 saídas livres que sobravam. 16/17 são livres no
+// ESP32-WROOM (DevKit); no WROVER eles vão para a PSRAM.
+constexpr uint8_t MOT_Y_IN1 = 13;
+constexpr uint8_t MOT_Y_IN2 = 16;
+constexpr uint8_t MOT_Y_IN3 = 17;
+constexpr uint8_t MOT_Y_IN4 = 23;
 // TODO: Y. Saídas livres que sobram: 13, 16, 17, 23 (faltam 5: 4 bobinas do
 // Y + garra). Livre só como entrada: 39.
 
@@ -51,6 +57,10 @@ constexpr uint8_t HOME_X = 32;
 // saídas do Y/garra (o 39, só entrada, está livre). É de strapping, mas com o
 // pull-down a placa liga normal.
 constexpr uint8_t HOME_Z = 4;
+// Y (2026-11-15): GPIO 39, só entrada e SEM pull interno -> o pull-down
+// externo de 10 kΩ é obrigatório (mesma ligação das outras chaves). A errata
+// do 36/39 é de interrupção falsa: aqui a chave é lida por amostragem.
+constexpr uint8_t HOME_Y = 39;
 
 // ---------- Alarme ----------
 // LED azul da placa (DevKit). GPIO 2 é de strapping, mas só importa no
