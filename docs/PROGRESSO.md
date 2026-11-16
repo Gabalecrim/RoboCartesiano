@@ -231,7 +231,60 @@ Mudanças:
   carro fica parado exatamente no ponto em que a chave aciona (fim do homing) e a vibração do Z
   faz ela bater; ou interferência do cabo do Z no GPIO 32. A conferir.
 
+### Eixo Y (2026-11-15)
+- Módulo à parte: `src/eixo_y.cpp` / `eixo_y.h`. O X e o Z não mudaram; o `main.cpp` só ganhou
+  7 linhas (include, `yIniciar` no setup, `yLoop` no loop, comando `Y`, ajuda, e `q`/`l`
+  param/soltam o Y também).
+- Pinos (`pins.h`): motor Y 13/16/17/23, encoder Y 33/36 (já reservados), chave Y 39 (só
+  entrada: pull-down EXTERNO de 10 kΩ obrigatório).
+- Mesma lógica do X, com as mesmas libs: posição só pelo encoder (`lib/malha`), setpoint de
+  velocidade pelo encoder (`lib/governo`, ajustes próprios salvos em "govY"), encoder sem
+  sinal, nada para por interpretação do encoder, homing pela chave (janela de travamento 0).
+- **A conferir**: mecânica igual à do X (28BYJ-48, TR8x8 = 256 passos/mm, KY-040 = 10
+  contagens/mm), curso 190 mm, Y = 0 na chave, chave no lado `f` (`Y_SENTIDO_CHAVE`). Tudo em
+  constantes no topo do `eixo_y.cpp`.
+- Comandos: `Y`, `YH`, `Y120`, `Y+10`/`Y-1`, `YR`, `YV1.5`, `YQ`, `YL`, `YF1`/`YB1`, `YE`, `YT`,
+  `YG`/`YGQ`/`YGA`/`YGD`/`YGS`/`YG0`. Telemetria própria `@Y` (a `@T` do X/Z não mudou).
+- Painel: quadro "Eixo Y" (aba Operar) com posição/alvo/falta/velocidade, comandos, jog pelo
+  encoder, gráficos de posição e velocidade, setpoint e governo do Y; chip "Y" no topo.
+- Ainda não entra no Y: programa de setpoints (`S`/`R`) — continua só X e Z.
+
+### Eixo Y com tudo o que o X tem (2026-11-15)
+- Firmware (`eixo_y.cpp`): testador de bobinas (`YI1..4`, `YIP`/`YIO`, `YI0`), monitor do encoder
+  (`YE`), tempo com encoder ligado x parado (`YTV1`), diagnóstico do homing (`YHD`), ajustes do
+  homing (`YHV`/`YHL`/`YHT`/`YHS`), chave (`YS`), velocidade/aceleração/partida (`YV`/`YA`/`YN`),
+  calibração de distância (`YD100` → `YM99.6`, salva em "calibY"), `YK`/`YK0`, auto calibração do
+  homing (`YCAL3`), varredura (`YW`), curva da rampa em CSV (`YP30`), detecção liga/desliga
+  (`YC0`/`YC1`), zerar (`YZ`).
+- `HA` agora faz Z, X e **Y**; `E` testa X, Z e **Y**; novo `EY`; `s` mostra a chave do Y.
+- Painel: diagnóstico do homing Y (aba Operar); velocidade, calibração e auto calibração do Y
+  (aba Ajustes); bobinas do Y com LEDs, encoder/chave/detecção do Y e velocidade/rampa do Y
+  (aba Testes); "Só o Y" no teste dos eixos; chip "chave Y" no topo.
+- Mensagens do Y escritas para não cair nos regex do X (ex.: `2) Y andando`, `Y andou o curso`).
+
+### Y no testador de bobinas e no programa (2026-11-15)
+- Testador de bobinas compartilhado: `TY` escolhe o motor Y (além de `TX`/`TZ`); `1..4`, `p`/`o`,
+  girar e `T0` valem para ele. No painel, botão **Y** no mesmo quadro (o quadro separado saiu).
+- Programa de setpoints com Y: `Setpoint` ganhou `tem_y`/`y_mm` e `ProgLimites` ganhou `y`
+  (`PROG_Y_FORA_DO_CURSO`); `test_setpoint` com 3 testes novos. Comando `S<x> <z> [mm/s] [ms]
+  [y<mm>]` (ex.: `S120 40 y95`); sem `y` o Y não mexe naquele ponto.
+- O Y anda na **fase do X** (os dois horizontais): Z sobe antes / desce depois, como antes.
+  O sequenciador espera o Y; pausa/cancelar freiam o Y; o `R` faz o homing do Y se algum ponto
+  usa o Y; velocidade do ponto vale para o Y também.
+- **O programa salvo antes do Y é apagado ao ligar** (formato mudou): cadastre os pontos de novo.
+- Painel (aba Programa): campo Y (vazio = não mexe), coluna Y na tabela, "Usar posição atual"
+  e "Copiar" preenchem o Y.
+
+### Encoder Y travado andando para frente (2026-11-15)
+- Bancada: o carro do Y anda, mas indo para frente (afastando da chave, giro `b`) o encoder fica
+  oscilando 0/−1; voltando conta só ~40% e os erros de quadratura sobem (3 → 239).
+- Novo `YED` (painel: Testes → Encoder e chave do Y): 1 volta para cada lado a 150 passos/s, lê A e
+  B direto nos pinos e conta mudanças por canal, transições válidas +/− e impossíveis. Conclui:
+  canal morto (A = GPIO 33, B = GPIO 36), vai-e-volta (eixo do encoder treme: acoplamento
+  patinando), ruído, ou conta a menos.
+
 ### A decidir / medir
+- Rodar `YED` no Y e decidir: fio, acoplamento ou ruído.
 - Ajustar `GOV_QUEDA_PCT` (75%) na bancada: o KY-040 tem ±10% de resolução na janela de 0,5 s
   a 500 passos/s. Queda falsa sem travar → baixe para 65%.
 - Ver nas linhas `[trava X]` em que velocidade o X trava sem carga: se for sempre perto de
